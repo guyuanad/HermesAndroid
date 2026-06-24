@@ -45,6 +45,11 @@ class MainActivity : ReactActivity() {
     override fun getMainComponentName(): String = "HermesAndroid"
 
     override fun createReactActivityDelegate(): ReactActivityDelegate {
-        return DefaultReactActivityDelegate(this)
+        return DefaultReactActivityDelegate(
+            this,
+            mainComponentName,
+            fabricEnabled = true,
+            concurrentReactEnabled = true
+        )
     }
 }
