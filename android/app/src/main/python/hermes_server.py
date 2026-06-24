@@ -7,8 +7,9 @@ It provides the core API endpoints needed by the React Native UI:
   - Configuration & environment variables
   - System status / health check
 
-LLM calls go through the openai Python SDK (compatible with OpenAI,
-OpenRouter, Anthropic via OpenRouter, etc.).
+LLM calls go directly through httpx to the OpenAI-compatible API
+(OpenRouter, OpenAI, etc.) - no openai SDK needed, avoiding
+Rust-compiled dependencies (pydantic-core, jiter, tiktoken).
 """
 
 from __future__ import annotations
@@ -20,9 +21,9 @@ import os
 import time
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -36,7 +37,7 @@ logger = logging.getLogger("hermes_server")
 
 _hermes_home: str = ""
 _start_time: float = time.time()
-_sessions: Dict[str, dict] = {}  # id -> session dict
+_sessions: Dict[str, dict] = {}
 _config: dict = {}
 _env_vars: Dict[str, str] = {}
 
@@ -64,7 +65,6 @@ def _now_iso() -> str:
 
 
 def _load_env_file(path: str) -> Dict[str, str]:
-    """Parse a simple KEY=VALUE .env file."""
     env = {}
     try:
         with open(path) as f:
@@ -107,7 +107,6 @@ def _save_config(path: str, cfg: dict) -> None:
 
 
 def _persist_session(session: dict) -> None:
-    """Save session to disk."""
     sessions_dir = os.path.join(_hermes_home, "sessions")
     os.makedirs(sessions_dir, exist_ok=True)
     sid = session["id"]
@@ -117,7 +116,6 @@ def _persist_session(session: dict) -> None:
 
 
 def _load_sessions_from_disk() -> None:
-    """Load persisted sessions on startup."""
     global _sessions
     sessions_dir = os.path.join(_hermes_home, "sessions")
     if not os.path.isdir(sessions_dir):
@@ -133,55 +131,77 @@ def _load_sessions_from_disk() -> None:
             pass
 
 
-async def _call_llm_stream(messages: List[dict], model: str, api_key: str, base_url: str):
-    """Stream chat completions from the LLM provider via openai SDK."""
-    try:
-        from openai import OpenAI
-    except ImportError:
-        yield 'data: {"type": "error", "data": {"text": "openai package not installed"}}\n\n'
-        return
-
-    try:
-        client = OpenAI(api_key=api_key, base_url=base_url)
-        stream = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            stream=True,
-        )
-        for chunk in stream:
-            if chunk.choices and chunk.choices[0].delta.content:
-                text = chunk.choices[0].delta.content
-                yield f'data: {json.dumps({"type": "text_delta", "data": {"text": text}})}\n\n'
-        yield 'data: {"type": "done", "data": {}}\n\n'
-    except Exception as e:
-        logger.error(f"LLM call failed: {e}")
-        yield f'data: {json.dumps({"type": "error", "data": {"text": str(e)}})}\n\n'
-
-
 def _get_llm_config() -> tuple:
     """Get model, api_key, base_url from config and env."""
     model = _config.get("model", {}).get("default", "openrouter/auto")
     provider = _config.get("model", {}).get("provider", "auto")
 
-    # Determine API key and base URL based on provider
     api_key = ""
     base_url = "https://openrouter.ai/api/v1"
 
     if "anthropic" in provider or "anthropic" in model:
         api_key = _env_vars.get("ANTHROPIC_API_KEY", "")
-        base_url = "https://openrouter.ai/api/v1"  # Use OpenRouter as proxy
     elif "google" in provider or "gemini" in model:
         api_key = _env_vars.get("GOOGLE_API_KEY", "")
-        base_url = "https://openrouter.ai/api/v1"
     elif "openrouter" in model or provider == "auto":
         api_key = _env_vars.get("OPENROUTER_API_KEY", "")
-        base_url = "https://openrouter.ai/api/v1"
     else:
-        # Try OpenAI-compatible
         api_key = _env_vars.get("OPENAI_API_KEY", _env_vars.get("OPENROUTER_API_KEY", ""))
         base_url = _env_vars.get("OPENAI_BASE_URL", "https://openrouter.ai/api/v1")
 
     return model, api_key, base_url
+
+
+async def _call_llm_stream(messages: List[dict], model: str, api_key: str, base_url: str):
+    """Stream chat completions from LLM provider via httpx (no openai SDK)."""
+    url = f"{base_url.rstrip('/')}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://hermes-agent.android",
+        "X-Title": "Hermes Agent Android",
+    }
+    payload = {
+        "model": model,
+        "messages": messages,
+        "stream": True,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=30.0)) as client:
+            async with client.stream("POST", url, json=payload, headers=headers) as response:
+                if response.status_code != 200:
+                    error_text = await response.aread()
+                    try:
+                        error_json = json.loads(error_text)
+                        error_msg = error_json.get("error", {}).get("message", error_text.decode())
+                    except Exception:
+                        error_msg = error_text.decode()
+                    yield f'data: {json.dumps({"type": "error", "data": {"text": f"API Error ({response.status_code}): {error_msg}"}})}\n\n'
+                    return
+
+                async for line in response.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    data_str = line[6:].strip()
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data_str)
+                        delta = chunk.get("choices", [{}])[0].get("delta", {})
+                        content = delta.get("content", "")
+                        if content:
+                            yield f'data: {json.dumps({"type": "text_delta", "data": {"text": content}})}\n\n'
+                    except json.JSONDecodeError:
+                        pass
+
+        yield 'data: {"type": "done", "data": {}}\n\n'
+
+    except httpx.ConnectError as e:
+        yield f'data: {json.dumps({"type": "error", "data": {"text": f"Connection error: {e}"}})}\n\n'
+    except Exception as e:
+        logger.error(f"LLM call failed: {e}")
+        yield f'data: {json.dumps({"type": "error", "data": {"text": str(e)}})}\n\n'
 
 
 # ---------------------------------------------------------------------------
@@ -231,7 +251,6 @@ def create_app() -> FastAPI:
 
     @app.post("/api/chat")
     async def api_chat(request: Request):
-        """Send a message and get a streaming response via SSE."""
         body = await request.json()
         session_id = body.get("session_id")
         message = body.get("message", "")
@@ -239,7 +258,6 @@ def create_app() -> FastAPI:
         if not message:
             raise HTTPException(400, "message is required")
 
-        # Get or create session
         if not session_id or session_id not in _sessions:
             session_id = str(uuid.uuid4())
             _sessions[session_id] = {
@@ -256,7 +274,6 @@ def create_app() -> FastAPI:
 
         session = _sessions[session_id]
 
-        # Add user message
         session["messages"].append({
             "id": str(uuid.uuid4()),
             "role": "user",
@@ -266,15 +283,13 @@ def create_app() -> FastAPI:
         session["message_count"] += 1
         session["updated_at"] = _now_iso()
 
-        # Build messages for LLM
         llm_messages = []
-        for m in session["messages"][-20:]:  # Last 20 messages for context
+        for m in session["messages"][-20:]:
             llm_messages.append({"role": m["role"], "content": m["content"]})
 
         model, api_key, base_url = _get_llm_config()
 
         if not api_key:
-            # No API key configured - return error message
             session["messages"].append({
                 "id": str(uuid.uuid4()),
                 "role": "assistant",
@@ -289,12 +304,10 @@ def create_app() -> FastAPI:
                 media_type="text/event-stream",
             )
 
-        # Stream LLM response
         async def generate():
             full_text = ""
             async for event in _call_llm_stream(llm_messages, model, api_key, base_url):
                 yield event
-                # Extract text delta for session persistence
                 try:
                     data_str = event.removeprefix("data: ").strip()
                     if data_str:
@@ -304,7 +317,6 @@ def create_app() -> FastAPI:
                 except Exception:
                     pass
 
-            # Save assistant response to session
             if full_text:
                 session["messages"].append({
                     "id": str(uuid.uuid4()),
@@ -368,7 +380,6 @@ def create_app() -> FastAPI:
     async def api_delete_session(session_id: str):
         if session_id in _sessions:
             del _sessions[session_id]
-            # Remove from disk
             path = os.path.join(_hermes_home, "sessions", f"{session_id}.json")
             if os.path.exists(path):
                 os.remove(path)
@@ -499,7 +510,7 @@ def create_app() -> FastAPI:
         _save_config(os.path.join(_hermes_home, "config.yaml"), _config)
         return {"model": model, "provider": provider}
 
-    # ----- Skills (stub) -----
+    # ----- Stubs -----
 
     @app.get("/api/skills")
     async def api_list_skills():
@@ -509,31 +520,21 @@ def create_app() -> FastAPI:
     async def api_skills_hub_search(q: str = ""):
         return []
 
-    # ----- Cron (stub) -----
-
     @app.get("/api/cron/jobs")
     async def api_list_cron():
         return []
-
-    # ----- MCP (stub) -----
 
     @app.get("/api/mcp/servers")
     async def api_list_mcp():
         return []
 
-    # ----- Memory (stub) -----
-
     @app.get("/api/memory")
     async def api_get_memory():
         return {"enabled": False}
 
-    # ----- Tools (stub) -----
-
     @app.get("/api/tools/toolsets")
     async def api_list_toolsets():
         return []
-
-    # ----- Logs -----
 
     @app.get("/api/logs")
     async def api_get_logs():
@@ -543,39 +544,30 @@ def create_app() -> FastAPI:
 
 
 # ---------------------------------------------------------------------------
-# Entry point (called from Kotlin via Chaquopy)
+# Entry point
 # ---------------------------------------------------------------------------
 
 
 def start_server() -> None:
-    """Start the Hermes FastAPI server on localhost.
-
-    Called from Kotlin via Chaquopy:
-      Python.getInstance().getModule("hermes_server").callAttr("start_server")
-    """
     global _hermes_home, _config, _env_vars
 
     from android_bootstrap import bootstrap
     _hermes_home = bootstrap()
 
-    # Load persisted config and env
     _config = _load_config(os.path.join(_hermes_home, "config.yaml"))
     if not _config:
         _config = DEFAULT_CONFIG.copy()
         _save_config(os.path.join(_hermes_home, "config.yaml"), _config)
 
     _env_vars = _load_env_file(os.path.join(_hermes_home, ".env"))
-    # Set env vars into process environment
     for k, v in _env_vars.items():
         os.environ.setdefault(k, v)
 
-    # Load persisted sessions
     _load_sessions_from_disk()
 
     logger.info(f"Hermes home: {_hermes_home}")
     logger.info(f"Loaded {len(_sessions)} sessions, {len(_env_vars)} env vars")
 
-    # Create and run the app
     app = create_app()
     logger.info("Starting Hermes server on 127.0.0.1:9119")
 
@@ -592,7 +584,6 @@ def start_server() -> None:
 
 
 def get_status() -> str:
-    """Return server status for health check."""
     try:
         import urllib.request
         req = urllib.request.Request("http://127.0.0.1:9119/api/status")
