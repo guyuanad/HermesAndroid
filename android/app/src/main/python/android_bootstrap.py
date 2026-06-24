@@ -5,8 +5,9 @@ import sys
 
 
 def get_hermes_home() -> str:
-    """Get or create the Hermes home directory."""
-    home = os.path.expanduser("~/.hermes")
+    """Get or create the Hermes home directory on Android."""
+    # Use app's internal storage
+    home = os.path.join(os.path.expanduser("~"), ".hermes")
     os.makedirs(home, exist_ok=True)
     return home
 
@@ -20,7 +21,6 @@ def ensure_directories(home: str) -> None:
         "cron",
         "mcp",
         "plugins",
-        "themes",
     ]
     for d in dirs:
         os.makedirs(os.path.join(home, d), exist_ok=True)
@@ -60,8 +60,8 @@ def ensure_env(home: str) -> None:
             f.write("# Hermes Agent Environment Variables\n")
             f.write("# Add your API keys below:\n")
             f.write("# OPENROUTER_API_KEY=sk-...\n")
+            f.write("# OPENAI_API_KEY=sk-...\n")
             f.write("# ANTHROPIC_API_KEY=sk-...\n")
-            f.write("# GOOGLE_API_KEY=...\n")
 
 
 def bootstrap() -> str:

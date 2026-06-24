@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -16,15 +16,10 @@ import { typography } from '../../theme/typography';
 import type { Message } from '../../api/types';
 
 export function ChatScreen() {
-  const { messages, isStreaming, sendMessage, newSession, connectWebSocket, disconnect } =
+  const { messages, isStreaming, sendMessage, newSession, stopStreaming } =
     useChat();
   const [inputText, setInputText] = useState('');
   const flatListRef = useRef<FlatList>(null);
-
-  useEffect(() => {
-    connectWebSocket();
-    return () => disconnect();
-  }, [connectWebSocket, disconnect]);
 
   const handleSend = useCallback(() => {
     if (inputText.trim()) {

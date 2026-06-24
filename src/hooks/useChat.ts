@@ -1,56 +1,13 @@
 import { useCallback, useRef } from 'react';
-import { hermesWS } from '../api/websocket';
 import { useChatStore } from '../store';
 import type { Message } from '../api/types';
-import client from '../api/client';
-import { ENDPOINTS } from '../api/endpoints';
+import { API_BASE } from '../api/endpoints';
 
-/** Hook for chat logic */
+/** Hook for chat logic - uses SSE streaming from the Python backend */
 export function useChat() {
   const { messages, currentSessionId, isStreaming, addMessage, setStreaming, setCurrentSession } =
     useChatStore();
-  const unsubscribers = useRef<Array<() => void>>([]);
-
-  const connectWebSocket = useCallback(() => {
-    hermesWS.connect('/api/events');
-
-    const unsub1 = hermesWS.on('text_delta', (event) => {
-      // Append text delta to last assistant message
-      const store = useChatStore.getState();
-      const lastMsg = store.messages[store.messages.length - 1];
-      if (lastMsg?.role === 'assistant') {
-        useChatStore.getState().updateLastAssistant(lastMsg.content + event.data.text);
-      }
-    });
-
-    const unsub2 = hermesWS.on('tool_call_start', (event) => {
-      addMessage({
-        id: event.data.id || Date.now().toString(),
-        role: 'tool',
-        content: `Running: ${event.data.name}`,
-        timestamp: new Date().toISOString(),
-        tool_calls: [
-          {
-            id: event.data.id || '',
-            name: event.data.name,
-            args: event.data.args || {},
-            status: 'running',
-          },
-        ],
-      });
-    });
-
-    const unsub3 = hermesWS.on('tool_call_result', (event) => {
-      addMessage({
-        id: `result-${event.data.id || Date.now()}`,
-        role: 'tool',
-        content: event.data.result || '',
-        timestamp: new Date().toISOString(),
-      });
-    });
-
-    unsubscribers.current = [unsub1, unsub2, unsub3];
-  }, [addMessage]);
+  const abortRef = useRef<AbortController | null>(null);
 
   const sendMessage = useCallback(
     async (text: string) => {
@@ -77,33 +34,109 @@ export function useChat() {
       setStreaming(true);
 
       try {
-        // Send to backend
-        await client.post('/api/chat', {
-          session_id: currentSessionId,
-          message: text,
+        const controller = new AbortController();
+        abortRef.current = controller;
+
+        const response = await fetch(`${API_BASE}/api/chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            session_id: currentSessionId,
+            message: text,
+          }),
+          signal: controller.signal,
         });
-      } catch (e) {
-        console.error('Failed to send message', e);
-        useChatStore.getState().updateLastAssistant('Error: Failed to send message');
+
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+
+        // Read SSE stream
+        const reader = response.body?.getReader();
+        if (!reader) throw new Error('No response body');
+
+        const decoder = new TextDecoder();
+        let fullText = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          const chunk = decoder.decode(value, { stream: true });
+          // Parse SSE events
+          const lines = chunk.split('\n');
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue;
+            const dataStr = line.slice(6).trim();
+            if (!dataStr) continue;
+
+            try {
+              const parsed = JSON.parse(dataStr);
+              if (parsed.type === 'text_delta' && parsed.data?.text) {
+                fullText += parsed.data.text;
+                useChatStore.getState().updateLastAssistant(fullText);
+              } else if (parsed.type === 'error' && parsed.data?.text) {
+                useChatStore.getState().updateLastAssistant(
+                  (fullText ? fullText + '\n\n' : '') + `Error: ${parsed.data.text}`
+                );
+              } else if (parsed.type === 'done') {
+                // Stream complete
+              }
+            } catch {
+              // Ignore parse errors
+            }
+          }
+        }
+
+        // If we got a session_id from creating a new session, update it
+        // The backend creates a session if none exists
+        if (!currentSessionId) {
+          // Fetch sessions to find the latest one
+          try {
+            const sessionsRes = await fetch(`${API_BASE}/api/sessions`);
+            if (sessionsRes.ok) {
+              const sessions = await sessionsRes.json();
+              if (sessions.length > 0) {
+                setCurrentSession(sessions[sessions.length - 1].id);
+              }
+            }
+          } catch {
+            // Ignore
+          }
+        }
+      } catch (e: any) {
+        if (e.name !== 'AbortError') {
+          console.error('Failed to send message', e);
+          useChatStore.getState().updateLastAssistant(
+            'Error: Failed to connect to backend. Make sure the app has internet permission.'
+          );
+        }
       } finally {
         setStreaming(false);
+        abortRef.current = null;
       }
     },
-    [currentSessionId, isStreaming, addMessage, setStreaming]
+    [currentSessionId, isStreaming, addMessage, setStreaming, setCurrentSession]
   );
 
   const newSession = useCallback(async () => {
     try {
-      const res = await client.post(ENDPOINTS.SESSIONS, {});
-      setCurrentSession(res.data.id);
+      const res = await fetch(`${API_BASE}/api/sessions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: 'New Session' }),
+      });
+      if (res.ok) {
+        const session = await res.json();
+        setCurrentSession(session.id);
+      }
     } catch (e) {
       console.error('Failed to create session', e);
     }
   }, [setCurrentSession]);
 
-  const disconnect = useCallback(() => {
-    unsubscribers.current.forEach((unsub) => unsub());
-    hermesWS.disconnect();
+  const stopStreaming = useCallback(() => {
+    abortRef.current?.abort();
   }, []);
 
   return {
@@ -111,7 +144,6 @@ export function useChat() {
     isStreaming,
     sendMessage,
     newSession,
-    connectWebSocket,
-    disconnect,
+    stopStreaming,
   };
 }
