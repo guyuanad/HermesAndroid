@@ -1,12 +1,10 @@
 package com.hermesandroid
 
 import android.content.Intent
-import android.net.Uri
 import android.os.Bundle
 import android.util.Log
 import com.facebook.react.ReactActivity
 import com.facebook.react.ReactActivityDelegate
-import com.facebook.react.defaults.DefaultNewArchitectureEntryPoint
 import com.facebook.react.defaults.DefaultReactActivityDelegate
 
 class MainActivity : ReactActivity() {
@@ -46,11 +44,7 @@ class MainActivity : ReactActivity() {
 
     override fun getMainComponentName(): String = "HermesAndroid"
 
-    override fun createReactActivityDelegate(): ReactActivityDelegate<*, *> {
-        return DefaultReactActivityDelegate(
-            this,
-            mainComponentName,
-            DefaultNewArchitectureEntryPoint.newArchitectureEnabled
-        )
+    override fun createReactActivityDelegate(): ReactActivityDelegate {
+        return DefaultReactActivityDelegate(this)
     }
 }
