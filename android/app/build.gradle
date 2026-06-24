@@ -123,26 +123,24 @@ dependencies {
 }
 
 chaquopy {
-    python {
-        version = "3.11"
-        pip {
-            install "openai==2.24.0"
-            install "fastapi==0.133.1"
-            install "uvicorn[standard]==0.41.0"
-            install "pydantic==2.13.4"
-            install "pyyaml==6.0.3"
-            install "rich==14.3.3"
-            install "croniter==6.0.0"
-            install "Pillow==12.2.0"
-            install "websockets==15.0.1"
-            install "prompt_toolkit==3.0.52"
-            install "python-dotenv==1.2.2"
-            install "httpx[socks]==0.28.1"
-            install "tenacity==9.1.4"
-            install "packaging==26.0"
-            install "Markdown==3.10.2"
-            install "PyJWT[crypto]==2.13.0"
-            install "hermes-agent==0.17.0"
-        }
+    pythonVersion = "3.11"
+    pip {
+        install "openai==2.24.0"
+        install "fastapi==0.133.1"
+        install "uvicorn[standard]==0.41.0"
+        install "pydantic==2.13.4"
+        install "pyyaml==6.0.3"
+        install "rich==14.3.3"
+        install "croniter==6.0.0"
+        install "Pillow==12.2.0"
+        install "websockets==15.0.1"
+        install "prompt_toolkit==3.0.52"
+        install "python-dotenv==1.2.2"
+        install "httpx[socks]==0.28.1"
+        install "tenacity==9.1.4"
+        install "packaging==26.0"
+        install "Markdown==3.10.2"
+        install "PyJWT[crypto]==2.13.0"
+        install "hermes-agent==0.17.0"
     }
 }
