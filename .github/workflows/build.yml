@@ -31,7 +31,7 @@ jobs:
         uses: android-actions/setup-android@v3
 
       - name: Install NDK
-        run: sdkmanager "ndk;26.1.10909125"
+        run: echo "y" | sdkmanager "ndk;27.1.12297006"
 
       - name: Setup Python for Chaquopy
         uses: actions/setup-python@v5
