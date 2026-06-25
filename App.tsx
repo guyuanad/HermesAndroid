@@ -134,7 +134,7 @@ function App() {
         <Text style={s.splashSub}>你的自我进化 AI 伙伴</Text>
         <ActivityIndicator size="large" color={C.onPrimary} style={{ marginTop: 40 }} />
         <Text style={s.splashStatus}>
-          {backendReady ? '就绪！' : '正在启动 Python 后端...'}
+          {backendReady ? '就绪！' : '正在启动 AI 引擎...'}
         </Text>
         {!backendReady && (
           <TouchableOpacity

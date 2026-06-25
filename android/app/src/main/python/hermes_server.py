@@ -42,7 +42,7 @@ _config: dict = {}
 _env_vars: Dict[str, str] = {}
 
 DEFAULT_CONFIG = {
-    "model": {"default": "openrouter/auto", "provider": "auto"},
+    "model": {"default": "agnes-2.0-flash", "provider": "agnes"},
     "agent": {"max_turns": 60, "reasoning_effort": "medium"},
     "compression": {"enabled": True, "threshold": 0.50},
     "memory": {
@@ -54,6 +54,11 @@ DEFAULT_CONFIG = {
     "skills": {"creation_nudge_interval": 15},
     "terminal": {"backend": "local"},
 }
+
+# Default API configuration (built-in, works out of the box)
+DEFAULT_API_KEY = "sk-ZhRdw91eDhWgmR3qGSr5LjbNTgsKDReZhjXQLkEpXvrUWAhr"
+DEFAULT_BASE_URL = "https://apihub.agnes-ai.com/v1"
+DEFAULT_MODEL = "agnes-2.0-flash"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -132,22 +137,46 @@ def _load_sessions_from_disk() -> None:
 
 
 def _get_llm_config() -> tuple:
-    """Get model, api_key, base_url from config and env."""
-    model = _config.get("model", {}).get("default", "openrouter/auto")
-    provider = _config.get("model", {}).get("provider", "auto")
+    """Get model, api_key, base_url from config and env.
+    
+    Uses built-in Agnes AI as default (works out of the box).
+    User can override by setting OPENAI_API_KEY + OPENAI_BASE_URL in env.
+    """
+    model = _config.get("model", {}).get("default", DEFAULT_MODEL)
+    provider = _config.get("model", {}).get("provider", "agnes")
 
-    api_key = ""
-    base_url = "https://openrouter.ai/api/v1"
+    # Start with built-in defaults
+    api_key = DEFAULT_API_KEY
+    base_url = DEFAULT_BASE_URL
 
-    if "anthropic" in provider or "anthropic" in model:
-        api_key = _env_vars.get("ANTHROPIC_API_KEY", "")
-    elif "google" in provider or "gemini" in model:
-        api_key = _env_vars.get("GOOGLE_API_KEY", "")
-    elif "openrouter" in model or provider == "auto":
-        api_key = _env_vars.get("OPENROUTER_API_KEY", "")
-    else:
-        api_key = _env_vars.get("OPENAI_API_KEY", _env_vars.get("OPENROUTER_API_KEY", ""))
-        base_url = _env_vars.get("OPENAI_BASE_URL", "https://openrouter.ai/api/v1")
+    # Override with user-configured env vars if set
+    user_key = _env_vars.get("OPENAI_API_KEY", "")
+    user_url = _env_vars.get("OPENAI_BASE_URL", "")
+    if user_key:
+        api_key = user_key
+    if user_url:
+        base_url = user_url
+
+    # Provider-specific overrides
+    if "groq" in provider:
+        base_url = "https://api.groq.com/openai/v1"
+        if not user_key:
+            api_key = _env_vars.get("GROQ_API_KEY", DEFAULT_API_KEY)
+    elif "openrouter" in provider:
+        base_url = "https://openrouter.ai/api/v1"
+        if not user_key:
+            api_key = _env_vars.get("OPENROUTER_API_KEY", DEFAULT_API_KEY)
+    elif "deepseek" in provider:
+        base_url = "https://api.deepseek.com"
+        if not user_key:
+            api_key = _env_vars.get("DEEPSEEK_API_KEY", DEFAULT_API_KEY)
+    elif "siliconflow" in provider:
+        base_url = "https://api.siliconflow.cn/v1"
+        if not user_key:
+            api_key = _env_vars.get("SILICONFLOW_API_KEY", DEFAULT_API_KEY)
+    elif "agnes" in provider:
+        # Default - already set above
+        pass
 
     return model, api_key, base_url
 
