@@ -292,8 +292,8 @@ def create_app() -> FastAPI:
             _sessions[session_id] = {
                 "id": session_id,
                 "title": message[:50],
-                "model": _config.get("model", {}).get("default", "openrouter/auto"),
-                "provider": _config.get("model", {}).get("provider", "auto"),
+                "model": _config.get("model", {}).get("default", DEFAULT_MODEL),
+                "provider": _config.get("model", {}).get("provider", "agnes"),
                 "created_at": _now_iso(),
                 "updated_at": _now_iso(),
                 "message_count": 0,
@@ -387,8 +387,8 @@ def create_app() -> FastAPI:
         session = {
             "id": sid,
             "title": title,
-            "model": _config.get("model", {}).get("default", "openrouter/auto"),
-            "provider": _config.get("model", {}).get("provider", "auto"),
+            "model": _config.get("model", {}).get("default", DEFAULT_MODEL),
+            "provider": _config.get("model", {}).get("provider", "agnes"),
             "created_at": _now_iso(),
             "updated_at": _now_iso(),
             "message_count": 0,
@@ -507,6 +507,8 @@ def create_app() -> FastAPI:
     @app.get("/api/model/options")
     async def api_model_options():
         return [
+            {"id": "agnes-2.0-flash", "name": "Agnes 2.0 Flash (免费)", "provider": "agnes",
+             "context_length": 128000, "supports_vision": False, "supports_tools": True},
             {"id": "openrouter/auto", "name": "Auto (OpenRouter)", "provider": "openrouter",
              "context_length": 128000, "supports_vision": True, "supports_tools": True},
             {"id": "openai/gpt-4o", "name": "GPT-4o", "provider": "openrouter",
@@ -524,16 +526,16 @@ def create_app() -> FastAPI:
     @app.get("/api/model/current")
     async def api_model_current():
         return {
-            "model": _config.get("model", {}).get("default", "openrouter/auto"),
-            "provider": _config.get("model", {}).get("provider", "auto"),
+            "model": _config.get("model", {}).get("default", DEFAULT_MODEL),
+            "provider": _config.get("model", {}).get("provider", "agnes"),
         }
 
     @app.post("/api/model/set")
     async def api_model_set(request: Request):
         global _config
         body = await request.json()
-        model = body.get("model", "openrouter/auto")
-        provider = body.get("provider", "auto")
+        model = body.get("model", DEFAULT_MODEL)
+        provider = body.get("provider", "agnes")
         _config.setdefault("model", {})["default"] = model
         _config["model"]["provider"] = provider
         _save_config(os.path.join(_hermes_home, "config.yaml"), _config)
@@ -586,6 +588,13 @@ def start_server() -> None:
     _config = _load_config(os.path.join(_hermes_home, "config.yaml"))
     if not _config:
         _config = DEFAULT_CONFIG.copy()
+        _save_config(os.path.join(_hermes_home, "config.yaml"), _config)
+
+    # Force-update model config to built-in Agnes AI defaults
+    # (upgrades old configs that had openrouter/auto)
+    if _config.get("model", {}).get("default", "") != DEFAULT_MODEL:
+        _config.setdefault("model", {})["default"] = DEFAULT_MODEL
+        _config["model"]["provider"] = "agnes"
         _save_config(os.path.join(_hermes_home, "config.yaml"), _config)
 
     _env_vars = _load_env_file(os.path.join(_hermes_home, ".env"))
