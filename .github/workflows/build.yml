@@ -38,7 +38,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install npm dependencies
-        run: npm ci
+        run: npm install
 
       - name: Bundle JavaScript for Android
         run: |
