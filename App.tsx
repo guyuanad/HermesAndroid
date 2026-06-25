@@ -130,18 +130,18 @@ function App() {
     return (
       <View style={s.splash}>
         <StatusBar barStyle="light-content" backgroundColor={C.primary} />
-        <Text style={s.splashTitle}>Hermes Agent</Text>
-        <Text style={s.splashSub}>Your self-improving AI companion</Text>
+        <Text style={s.splashTitle}>Hermes 智能助手</Text>
+        <Text style={s.splashSub}>你的自我进化 AI 伙伴</Text>
         <ActivityIndicator size="large" color={C.onPrimary} style={{ marginTop: 40 }} />
         <Text style={s.splashStatus}>
-          {backendReady ? 'Ready!' : 'Starting Python backend...'}
+          {backendReady ? '就绪！' : '正在启动 Python 后端...'}
         </Text>
         {!backendReady && (
           <TouchableOpacity
             style={s.retryBtn}
             onPress={() => setScreen('chat')}
           >
-            <Text style={s.retryBtnText}>Skip</Text>
+            <Text style={s.retryBtnText}>跳过</Text>
           </TouchableOpacity>
         )}
       </View>
@@ -276,7 +276,7 @@ function ChatScreen({ onSettings }: { onSettings: () => void }) {
       <View style={s.header}>
         <Text style={s.headerTitle}>Hermes</Text>
         <TouchableOpacity onPress={onSettings} style={s.headerBtn}>
-          <Text style={s.headerBtnText}>Settings</Text>
+          <Text style={s.headerBtnText}>设置</Text>
         </TouchableOpacity>
       </View>
 
@@ -288,8 +288,8 @@ function ChatScreen({ onSettings }: { onSettings: () => void }) {
         contentContainerStyle={s.msgList}
         ListEmptyComponent={
           <View style={s.empty}>
-            <Text style={s.emptyTitle}>Hermes Agent</Text>
-            <Text style={s.emptySub}>Start a conversation</Text>
+            <Text style={s.emptyTitle}>Hermes 智能助手</Text>
+            <Text style={s.emptySub}>开始对话吧</Text>
           </View>
         }
       />
@@ -298,7 +298,7 @@ function ChatScreen({ onSettings }: { onSettings: () => void }) {
       <View style={s.inputBar}>
         <TextInput
           style={s.textInput}
-          placeholder="Message Hermes..."
+          placeholder="输入消息..."
           placeholderTextColor={C.onSurfaceVariant}
           value={inputText}
           onChangeText={setInputText}
@@ -350,35 +350,35 @@ function SettingsScreen({ onBack }: { onBack: () => void }) {
       <StatusBar barStyle="dark-content" backgroundColor={C.surface} />
       <View style={s.header}>
         <TouchableOpacity onPress={onBack} style={s.headerBtn}>
-          <Text style={s.headerBtnText}>Back</Text>
+          <Text style={s.headerBtnText}>返回</Text>
         </TouchableOpacity>
-        <Text style={s.headerTitle}>Settings</Text>
+        <Text style={s.headerTitle}>设置</Text>
         <View style={{ width: 60 }} />
       </View>
 
       <ScrollView style={s.settingsContent}>
         {/* API Keys */}
         <View style={s.settingsSection}>
-          <Text style={s.sectionTitle}>API Keys</Text>
+          <Text style={s.sectionTitle}>API 密钥</Text>
           {envVars.map(env => (
             <View key={env.key} style={s.envRow}>
               <View style={s.envInfo}>
                 <Text style={s.envKey}>{env.key}</Text>
-                <Text style={s.envValue}>{env.is_set ? env.value : 'Not set'}</Text>
+                <Text style={s.envValue}>{env.is_set ? env.value : '未设置'}</Text>
               </View>
               <View style={s.envActions}>
                 <TouchableOpacity
                   style={s.envBtn}
                   onPress={() => { setEditingKey(env.key); setKeyValue(''); }}
                 >
-                  <Text style={s.envBtnText}>{env.is_set ? 'Edit' : 'Set'}</Text>
+                  <Text style={s.envBtnText}>{env.is_set ? '编辑' : '设置'}</Text>
                 </TouchableOpacity>
                 {env.is_set && (
                   <TouchableOpacity
                     style={[s.envBtn, s.envBtnDanger]}
                     onPress={() => handleDelete(env.key)}
                   >
-                    <Text style={s.envBtnText}>Delete</Text>
+                    <Text style={s.envBtnText}>删除</Text>
                   </TouchableOpacity>
                 )}
               </View>
@@ -386,7 +386,7 @@ function SettingsScreen({ onBack }: { onBack: () => void }) {
                 <View style={s.keyInputRow}>
                   <TextInput
                     style={s.keyInput}
-                    placeholder={`Enter ${env.key}`}
+                    placeholder={`输入 ${env.key}`}
                     placeholderTextColor={C.onSurfaceVariant}
                     value={keyValue}
                     onChangeText={setKeyValue}
@@ -394,10 +394,10 @@ function SettingsScreen({ onBack }: { onBack: () => void }) {
                     autoCapitalize="none"
                   />
                   <TouchableOpacity style={s.saveBtn} onPress={() => handleSave(env.key)}>
-                    <Text style={s.saveBtnText}>Save</Text>
+                    <Text style={s.saveBtnText}>保存</Text>
                   </TouchableOpacity>
                   <TouchableOpacity onPress={() => setEditingKey(null)}>
-                    <Text style={s.cancelBtnText}>Cancel</Text>
+                    <Text style={s.cancelBtnText}>取消</Text>
                   </TouchableOpacity>
                 </View>
               )}
@@ -407,13 +407,13 @@ function SettingsScreen({ onBack }: { onBack: () => void }) {
 
         {/* About */}
         <View style={s.settingsSection}>
-          <Text style={s.sectionTitle}>About</Text>
+          <Text style={s.sectionTitle}>关于</Text>
           <View style={s.aboutRow}>
-            <Text style={s.aboutLabel}>Version</Text>
+            <Text style={s.aboutLabel}>版本</Text>
             <Text style={s.aboutValue}>0.1.0-android</Text>
           </View>
           <View style={s.aboutRow}>
-            <Text style={s.aboutLabel}>Backend</Text>
+            <Text style={s.aboutLabel}>后端</Text>
             <Text style={s.aboutValue}>FastAPI + httpx</Text>
           </View>
         </View>

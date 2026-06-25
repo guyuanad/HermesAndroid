@@ -293,13 +293,13 @@ def create_app() -> FastAPI:
             session["messages"].append({
                 "id": str(uuid.uuid4()),
                 "role": "assistant",
-                "content": "Please configure your API key in Settings first. You need at least an OPENROUTER_API_KEY or OPENAI_API_KEY.",
+                "content": "请先在设置中配置 API 密钥。你需要至少设置 OPENROUTER_API_KEY 或 OPENAI_API_KEY。",
                 "timestamp": _now_iso(),
             })
             session["message_count"] += 1
             _persist_session(session)
             return StreamingResponse(
-                iter(['data: {"type": "text_delta", "data": {"text": "Please configure your API key in Settings first. You need at least an OPENROUTER_API_KEY or OPENAI_API_KEY."}}\n\n',
+                iter(['data: {"type": "text_delta", "data": {"text": "请先在设置中配置 API 密钥。你需要至少设置 OPENROUTER_API_KEY 或 OPENAI_API_KEY。"}}\n\n',
                       'data: {"type": "done", "data": {}}\n\n']),
                 media_type="text/event-stream",
             )
