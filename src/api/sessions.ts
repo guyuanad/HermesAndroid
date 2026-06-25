@@ -1,29 +1,37 @@
-import client from './client';
-import { ENDPOINTS } from './endpoints';
-import type { Session, Message } from './types';
+import { API_BASE } from './endpoints';
+import type { Session } from './types';
 
-/** Session API */
 export const sessionsApi = {
-  list: () => client.get<Session[]>(ENDPOINTS.SESSIONS).then((r) => r.data),
+  list: async (): Promise<Session[]> => {
+    const res = await fetch(`${API_BASE}/api/sessions`);
+    return res.json();
+  },
 
-  get: (id: string) =>
-    client.get<Session>(ENDPOINTS.SESSION_DETAIL(id)).then((r) => r.data),
+  get: async (id: string): Promise<Session> => {
+    const res = await fetch(`${API_BASE}/api/sessions/${id}`);
+    return res.json();
+  },
 
-  create: (title?: string) =>
-    client
-      .post<Session>(ENDPOINTS.SESSIONS, { title })
-      .then((r) => r.data),
+  create: async (title?: string): Promise<Session> => {
+    const res = await fetch(`${API_BASE}/api/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: title || 'New Session' }),
+    });
+    return res.json();
+  },
 
-  delete: (id: string) =>
-    client.delete(ENDPOINTS.SESSION_DETAIL(id)).then((r) => r.data),
+  delete: async (id: string): Promise<void> => {
+    await fetch(`${API_BASE}/api/sessions/${id}`, { method: 'DELETE' });
+  },
 
-  search: (query: string) =>
-    client
-      .get<Session[]>(ENDPOINTS.SESSION_SEARCH, { params: { q: query } })
-      .then((r) => r.data),
+  search: async (query: string): Promise<Session[]> => {
+    const res = await fetch(`${API_BASE}/api/sessions/search?q=${encodeURIComponent(query)}`);
+    return res.json();
+  },
 
-  export: (id: string) =>
-    client.get(ENDPOINTS.SESSION_EXPORT(id)).then((r) => r.data),
-
-  stats: () => client.get(ENDPOINTS.SESSION_STATS).then((r) => r.data),
+  stats: async () => {
+    const res = await fetch(`${API_BASE}/api/sessions/stats`);
+    return res.json();
+  },
 };

@@ -1,44 +1,69 @@
-import client from './client';
-import { ENDPOINTS } from './endpoints';
-import type { HermesConfig, EnvVar, ModelOption, SystemStatus } from './types';
+import { API_BASE } from './endpoints';
 
-/** Config API */
 export const configApi = {
-  get: () => client.get<HermesConfig>(ENDPOINTS.CONFIG).then((r) => r.data),
-
-  update: (config: Partial<HermesConfig>) =>
-    client.put(ENDPOINTS.CONFIG, config).then((r) => r.data),
-
-  getRaw: () => client.get<string>(ENDPOINTS.CONFIG_RAW).then((r) => r.data),
+  get: async () => {
+    const res = await fetch(`${API_BASE}/api/config`);
+    return res.json();
+  },
+  update: async (config: Record<string, unknown>) => {
+    const res = await fetch(`${API_BASE}/api/config`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(config),
+    });
+    return res.json();
+  },
 };
 
-/** Environment / API Keys API */
 export const envApi = {
-  get: () => client.get<EnvVar[]>(ENDPOINTS.ENV).then((r) => r.data),
-
-  set: (key: string, value: string) =>
-    client.put(ENDPOINTS.ENV, { key, value }).then((r) => r.data),
-
-  delete: (key: string) =>
-    client.delete(ENDPOINTS.ENV, { data: { key } }).then((r) => r.data),
+  get: async () => {
+    const res = await fetch(`${API_BASE}/api/env`);
+    return res.json();
+  },
+  set: async (key: string, value: string) => {
+    const res = await fetch(`${API_BASE}/api/env`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key, value }),
+    });
+    return res.json();
+  },
+  delete: async (key: string) => {
+    const res = await fetch(`${API_BASE}/api/env`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key }),
+    });
+    return res.json();
+  },
 };
 
-/** Model API */
 export const modelApi = {
-  options: () =>
-    client.get<ModelOption[]>(ENDPOINTS.MODEL_OPTIONS).then((r) => r.data),
-
-  current: () =>
-    client.get(ENDPOINTS.MODEL_CURRENT).then((r) => r.data),
-
-  set: (model: string, provider?: string) =>
-    client.post(ENDPOINTS.MODEL_SET, { model, provider }).then((r) => r.data),
+  options: async () => {
+    const res = await fetch(`${API_BASE}/api/model/options`);
+    return res.json();
+  },
+  current: async () => {
+    const res = await fetch(`${API_BASE}/api/model/current`);
+    return res.json();
+  },
+  set: async (model: string, provider: string) => {
+    const res = await fetch(`${API_BASE}/api/model/set`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, provider }),
+    });
+    return res.json();
+  },
 };
 
-/** System API */
 export const systemApi = {
-  status: () =>
-    client.get<SystemStatus>(ENDPOINTS.STATUS).then((r) => r.data),
-
-  stats: () => client.get(ENDPOINTS.SYSTEM_STATS).then((r) => r.data),
+  stats: async () => {
+    const res = await fetch(`${API_BASE}/api/system/stats`);
+    return res.json();
+  },
+  status: async () => {
+    const res = await fetch(`${API_BASE}/api/status`);
+    return res.json();
+  },
 };
