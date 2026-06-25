@@ -185,75 +185,122 @@ function ChatScreen({ onSettings }: { onSettings: () => void }) {
     setInputText('');
     setIsStreaming(true);
 
-    try {
-      const controller = new AbortController();
-      abortRef.current = controller;
+    const xhr = new XMLHttpRequest();
+    abortRef.current = {
+      abort: () => xhr.abort(),
+    } as any;
 
-      const response = await fetch(`${API_BASE}/api/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: sessionId, message: text }),
-        signal: controller.signal,
-      });
+    let fullText = '';
+    let processedIndex = 0;
 
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    xhr.open('POST', `${API_BASE}/api/chat`);
+    xhr.setRequestHeader('Content-Type', 'application/json');
 
-      const reader = response.body?.getReader();
-      if (!reader) throw new Error('No response body');
+    xhr.onprogress = () => {
+      const responseText = xhr.responseText;
+      const newData = responseText.substring(processedIndex);
+      processedIndex = responseText.length;
 
-      const decoder = new TextDecoder();
-      let fullText = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        const chunk = decoder.decode(value, { stream: true });
-        for (const line of chunk.split('\n')) {
-          if (!line.startsWith('data: ')) continue;
-          const dataStr = line.slice(6).trim();
-          if (!dataStr) continue;
-          try {
-            const parsed = JSON.parse(dataStr);
-            if (parsed.type === 'text_delta' && parsed.data?.text) {
-              fullText += parsed.data.text;
-              setMessages(prev => {
-                const updated = [...prev];
-                updated[updated.length - 1] = {
-                  ...updated[updated.length - 1],
-                  content: fullText,
-                };
-                return updated;
-              });
-            } else if (parsed.type === 'error' && parsed.data?.text) {
-              fullText += (fullText ? '\n\n' : '') + `Error: ${parsed.data.text}`;
-              setMessages(prev => {
-                const updated = [...prev];
-                updated[updated.length - 1] = {
-                  ...updated[updated.length - 1],
-                  content: fullText,
-                };
-                return updated;
-              });
-            }
-          } catch {}
-        }
+      for (const line of newData.split('\n')) {
+        if (!line.startsWith('data: ')) continue;
+        const dataStr = line.slice(6).trim();
+        if (!dataStr) continue;
+        try {
+          const parsed = JSON.parse(dataStr);
+          if (parsed.type === 'text_delta' && parsed.data?.text) {
+            fullText += parsed.data.text;
+            setMessages(prev => {
+              const updated = [...prev];
+              updated[updated.length - 1] = {
+                ...updated[updated.length - 1],
+                content: fullText,
+              };
+              return updated;
+            });
+          } else if (parsed.type === 'error' && parsed.data?.text) {
+            fullText += (fullText ? '\n\n' : '') + `Error: ${parsed.data.text}`;
+            setMessages(prev => {
+              const updated = [...prev];
+              updated[updated.length - 1] = {
+                ...updated[updated.length - 1],
+                content: fullText,
+              };
+              return updated;
+            });
+          }
+        } catch {}
       }
-    } catch (e: any) {
-      if (e.name !== 'AbortError') {
+    };
+
+    xhr.onload = () => {
+      // Process any remaining data
+      const responseText = xhr.responseText;
+      const newData = responseText.substring(processedIndex);
+      for (const line of newData.split('\n')) {
+        if (!line.startsWith('data: ')) continue;
+        const dataStr = line.slice(6).trim();
+        if (!dataStr) continue;
+        try {
+          const parsed = JSON.parse(dataStr);
+          if (parsed.type === 'text_delta' && parsed.data?.text) {
+            fullText += parsed.data.text;
+            setMessages(prev => {
+              const updated = [...prev];
+              updated[updated.length - 1] = {
+                ...updated[updated.length - 1],
+                content: fullText,
+              };
+              return updated;
+            });
+          } else if (parsed.type === 'error' && parsed.data?.text) {
+            fullText += (fullText ? '\n\n' : '') + `Error: ${parsed.data.text}`;
+            setMessages(prev => {
+              const updated = [...prev];
+              updated[updated.length - 1] = {
+                ...updated[updated.length - 1],
+                content: fullText,
+              };
+              return updated;
+            });
+          }
+        } catch {}
+      }
+
+      if (!fullText && xhr.status !== 200) {
         setMessages(prev => {
           const updated = [...prev];
           updated[updated.length - 1] = {
             ...updated[updated.length - 1],
-            content: `Error: ${e.message}`,
+            content: `Error: HTTP ${xhr.status}`,
           };
           return updated;
         });
       }
-    } finally {
       setIsStreaming(false);
       abortRef.current = null;
-    }
+    };
+
+    xhr.onerror = () => {
+      if (!fullText) {
+        setMessages(prev => {
+          const updated = [...prev];
+          updated[updated.length - 1] = {
+            ...updated[updated.length - 1],
+            content: 'Error: 网络连接失败，请检查后端是否已启动',
+          };
+          return updated;
+        });
+      }
+      setIsStreaming(false);
+      abortRef.current = null;
+    };
+
+    xhr.onabort = () => {
+      setIsStreaming(false);
+      abortRef.current = null;
+    };
+
+    xhr.send(JSON.stringify({ session_id: sessionId, message: text }));
   }, [sessionId, isStreaming]);
 
   const stopStreaming = () => abortRef.current?.abort();
