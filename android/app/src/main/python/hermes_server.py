@@ -1,15 +1,8 @@
-"""Hermes Agent Android server - lightweight FastAPI backend.
+"""Hermes Agent Android server - v0.3.0 with full tool system.
 
-This is a self-contained FastAPI server that runs on Android via Chaquopy.
-It provides the core API endpoints needed by the React Native UI:
-  - Chat with LLM (streaming via SSE)
-  - Session management (in-memory + file persistence)
-  - Configuration & environment variables
-  - System status / health check
-
-LLM calls go directly through httpx to the OpenAI-compatible API
-(OpenRouter, OpenAI, etc.) - no openai SDK needed, avoiding
-Rust-compiled dependencies (pydantic-core, jiter, tiktoken).
+FastAPI backend running on Android via Chaquopy.
+Integrates: ToolRegistry, MemoryStore, Skills, Cron, TodoStore.
+Supports agent loop with tool calling via OpenAI-compatible API.
 """
 
 from __future__ import annotations
@@ -40,10 +33,11 @@ _start_time: float = time.time()
 _sessions: Dict[str, dict] = {}
 _config: dict = {}
 _env_vars: Dict[str, str] = {}
+_registry = None  # Initialized after tools import
 
 DEFAULT_CONFIG = {
     "model": {"default": "agnes-2.0-flash", "provider": "agnes"},
-    "agent": {"max_turns": 60, "reasoning_effort": "medium"},
+    "agent": {"max_turns": 10, "reasoning_effort": "medium"},
     "compression": {"enabled": True, "threshold": 0.50},
     "memory": {
         "memory_enabled": True,
@@ -55,10 +49,10 @@ DEFAULT_CONFIG = {
     "terminal": {"backend": "local"},
 }
 
-# Default API configuration (built-in, works out of the box)
 DEFAULT_API_KEY = "sk-ZhRdw91eDhWgmR3qGSr5LjbNTgsKDReZhjXQLkEpXvrUWAhr"
 DEFAULT_BASE_URL = "https://apihub.agnes-ai.com/v1"
 DEFAULT_MODEL = "agnes-2.0-flash"
+MAX_TOOL_TURNS = 10
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -137,19 +131,12 @@ def _load_sessions_from_disk() -> None:
 
 
 def _get_llm_config() -> tuple:
-    """Get model, api_key, base_url from config and env.
-    
-    Uses built-in Agnes AI as default (works out of the box).
-    User can override by setting OPENAI_API_KEY + OPENAI_BASE_URL in env.
-    """
     model = _config.get("model", {}).get("default", DEFAULT_MODEL)
     provider = _config.get("model", {}).get("provider", "agnes")
 
-    # Start with built-in defaults
     api_key = DEFAULT_API_KEY
     base_url = DEFAULT_BASE_URL
 
-    # Override with user-configured env vars if set
     user_key = _env_vars.get("OPENAI_API_KEY", "")
     user_url = _env_vars.get("OPENAI_BASE_URL", "")
     if user_key:
@@ -157,7 +144,6 @@ def _get_llm_config() -> tuple:
     if user_url:
         base_url = user_url
 
-    # Provider-specific overrides
     if "groq" in provider:
         base_url = "https://api.groq.com/openai/v1"
         if not user_key:
@@ -186,15 +172,126 @@ def _get_llm_config() -> tuple:
         base_url = "https://api.siliconflow.cn/v1"
         if not user_key:
             api_key = _env_vars.get("SILICONFLOW_API_KEY", DEFAULT_API_KEY)
-    elif "agnes" in provider:
-        # Default - already set above
-        pass
 
     return model, api_key, base_url
 
 
+# ---------------------------------------------------------------------------
+# LLM with Tool Calling (Agent Loop)
+# ---------------------------------------------------------------------------
+
+async def _call_llm_with_tools(
+    messages: List[dict],
+    model: str,
+    api_key: str,
+    base_url: str,
+    tools: List[dict] = None,
+    max_turns: int = MAX_TOOL_TURNS,
+) -> Any:
+    """Call LLM with tool support. Returns (full_text, tool_calls_log)."""
+
+    url = f"{base_url.rstrip('/')}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://hermes-agent.android",
+        "X-Title": "Hermes Agent Android",
+    }
+
+    tool_calls_log = []
+    current_messages = list(messages)
+    full_text = ""
+
+    for turn in range(max_turns + 1):
+        payload: dict = {
+            "model": model,
+            "messages": current_messages,
+            "stream": False,
+        }
+        if tools and turn == 0:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
+
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=30.0)) as client:
+                response = await client.post(url, json=payload, headers=headers)
+
+                if response.status_code != 200:
+                    try:
+                        error_json = response.json()
+                        error_msg = error_json.get("error", {}).get("message", response.text)
+                    except Exception:
+                        error_msg = response.text
+                    return full_text, tool_calls_log, f"API Error ({response.status_code}): {error_msg}"
+
+                data = response.json()
+                choice = data.get("choices", [{}])[0]
+                message = choice.get("message", {})
+                finish_reason = choice.get("finish_reason", "")
+
+                # Collect text content
+                content = message.get("content", "")
+                if content:
+                    full_text += content
+
+                # Check for tool calls
+                tool_calls = message.get("tool_calls", [])
+
+                if not tool_calls or finish_reason != "tool_calls":
+                    # No more tool calls, we're done
+                    break
+
+                # Add assistant message with tool calls
+                current_messages.append(message)
+
+                # Process each tool call
+                for tc in tool_calls:
+                    tc_id = tc.get("id", str(uuid.uuid4()))
+                    func = tc.get("function", {})
+                    tool_name = func.get("name", "")
+                    tool_args_str = func.get("arguments", "{}")
+
+                    try:
+                        tool_args = json.loads(tool_args_str) if isinstance(tool_args_str, str) else tool_args_str
+                    except json.JSONDecodeError:
+                        tool_args = {}
+
+                    # Inject home directory for tools that need it
+                    if tool_name in ("skills_list", "skill_view", "skill_manage"):
+                        tool_args.setdefault("home", _hermes_home)
+
+                    # Dispatch tool
+                    logger.info(f"Tool call: {tool_name}({tool_args})")
+                    tool_result_str = _registry.dispatch(tool_name, tool_args)
+
+                    # Log the tool call
+                    tool_calls_log.append({
+                        "name": tool_name,
+                        "arguments": tool_args,
+                        "result_preview": tool_result_str[:200],
+                    })
+
+                    # Add tool result to messages
+                    current_messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc_id,
+                        "content": tool_result_str,
+                    })
+
+                # Don't send tools schema on subsequent turns (simplify)
+                tools = None
+
+        except httpx.ConnectError as e:
+            return full_text, tool_calls_log, f"Connection error: {e}"
+        except Exception as e:
+            logger.error(f"LLM call failed: {e}", exc_info=True)
+            return full_text, tool_calls_log, str(e)
+
+    return full_text, tool_calls_log, None
+
+
 async def _call_llm_stream(messages: List[dict], model: str, api_key: str, base_url: str):
-    """Stream chat completions from LLM provider via httpx (no openai SDK)."""
+    """Stream chat completions from LLM provider via httpx (no tool calling in stream mode)."""
     url = f"{base_url.rstrip('/')}/chat/completions"
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -251,7 +348,7 @@ async def _call_llm_stream(messages: List[dict], model: str, api_key: str, base_
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Hermes Agent Android", version="0.1.0")
+    app = FastAPI(title="Hermes Agent Android", version="0.3.0")
 
     app.add_middleware(
         CORSMiddleware,
@@ -265,12 +362,17 @@ def create_app() -> FastAPI:
 
     @app.get("/api/status")
     async def api_status():
+        tool_names = _registry.get_all_tool_names() if _registry else []
         return {
             "status": "running",
-            "version": "0.1.0-android",
+            "version": "0.3.0-android",
             "uptime": int(time.time() - _start_time),
             "active_sessions": len(_sessions),
-            "gateway_status": {},
+            "tools_count": len(tool_names),
+            "tools": tool_names,
+            "memory_enabled": True,
+            "skills_enabled": True,
+            "cron_enabled": True,
         }
 
     @app.get("/api/health")
@@ -288,7 +390,7 @@ def create_app() -> FastAPI:
             "by_model": {},
         }
 
-    # ----- Chat -----
+    # ----- Chat with Tool Calling -----
 
     @app.post("/api/chat")
     async def api_chat(request: Request):
@@ -296,6 +398,7 @@ def create_app() -> FastAPI:
         session_id = body.get("session_id")
         message = body.get("message", "")
         system_prompt = body.get("system_prompt", "")
+        enable_tools = body.get("enable_tools", True)
 
         if not message:
             raise HTTPException(400, "message is required")
@@ -325,54 +428,102 @@ def create_app() -> FastAPI:
         session["message_count"] += 1
         session["updated_at"] = _now_iso()
 
+        # Build LLM messages
         llm_messages = []
-        # Add system prompt if provided
+
+        # System prompt with memory context
+        sys_parts = []
         if system_prompt:
-            llm_messages.append({"role": "system", "content": system_prompt})
+            sys_parts.append(system_prompt)
+
+        # Add memory context
+        from tools.memory_tool import get_memory_store
+        mem_store = get_memory_store()
+        if mem_store:
+            mem_context = mem_store.format_for_system_prompt()
+            if mem_context:
+                sys_parts.append(mem_context)
+
+        # Add todo context
+        from tools.todo_tool import _get_store
+        todo_store = _get_store(session_id)
+        if todo_store and todo_store.has_items():
+            todo_context = todo_store.format_for_injection()
+            if todo_context:
+                sys_parts.append(todo_context)
+
+        if sys_parts:
+            llm_messages.append({"role": "system", "content": "\n\n".join(sys_parts)})
+
         for m in session["messages"][-20:]:
             llm_messages.append({"role": m["role"], "content": m["content"]})
 
         model, api_key, base_url = _get_llm_config()
 
         if not api_key:
+            error_msg = "请先在设置中配置 API 密钥。"
             session["messages"].append({
                 "id": str(uuid.uuid4()),
                 "role": "assistant",
-                "content": "请先在设置中配置 API 密钥。你需要至少设置 OPENROUTER_API_KEY 或 OPENAI_API_KEY。",
+                "content": error_msg,
                 "timestamp": _now_iso(),
             })
             session["message_count"] += 1
             _persist_session(session)
             return StreamingResponse(
-                iter(['data: {"type": "text_delta", "data": {"text": "请先在设置中配置 API 密钥。你需要至少设置 OPENROUTER_API_KEY 或 OPENAI_API_KEY。"}}\n\n',
+                iter([f'data: {json.dumps({"type": "text_delta", "data": {"text": error_msg}})}\n\n',
                       'data: {"type": "done", "data": {}}\n\n']),
                 media_type="text/event-stream",
             )
 
-        async def generate():
-            full_text = ""
-            async for event in _call_llm_stream(llm_messages, model, api_key, base_url):
-                yield event
-                try:
-                    data_str = event.removeprefix("data: ").strip()
-                    if data_str:
-                        parsed = json.loads(data_str)
-                        if parsed.get("type") == "text_delta":
-                            full_text += parsed["data"]["text"]
-                except Exception:
-                    pass
+        # Get tool definitions if enabled
+        tools_schema = None
+        if enable_tools and _registry:
+            tools_schema = _registry.get_definitions()
 
-            if full_text:
-                session["messages"].append({
-                    "id": str(uuid.uuid4()),
-                    "role": "assistant",
-                    "content": full_text,
-                    "timestamp": _now_iso(),
-                    "model": model,
-                })
-                session["message_count"] += 1
-                session["updated_at"] = _now_iso()
-                _persist_session(session)
+        # Use non-streaming call with tool support
+        full_text, tool_calls_log, error = await _call_llm_with_tools(
+            llm_messages, model, api_key, base_url, tools=tools_schema,
+        )
+
+        if error and not full_text:
+            full_text = error
+
+        # Format response with tool call info
+        response_text = full_text
+        if tool_calls_log:
+            tool_summary = "\n\n".join(
+                f"🔧 {tc['name']}: {tc['result_preview']}"
+                for tc in tool_calls_log
+            )
+            response_text = full_text + "\n\n---\n**工具调用记录:**\n" + tool_summary
+
+        # Save assistant message
+        session["messages"].append({
+            "id": str(uuid.uuid4()),
+            "role": "assistant",
+            "content": response_text,
+            "timestamp": _now_iso(),
+            "model": model,
+            "tool_calls": tool_calls_log,
+        })
+        session["message_count"] += 1
+        session["updated_at"] = _now_iso()
+        _persist_session(session)
+
+        # Return as SSE for compatibility with existing frontend
+        async def generate():
+            # Send text in chunks for better UX
+            chunk_size = 50
+            for i in range(0, len(response_text), chunk_size):
+                chunk = response_text[i:i + chunk_size]
+                yield f'data: {json.dumps({"type": "text_delta", "data": {"text": chunk}})}\n\n'
+                await asyncio.sleep(0.01)
+
+            if tool_calls_log:
+                yield f'data: {json.dumps({"type": "tool_calls", "data": {"calls": tool_calls_log}})}\n\n'
+
+            yield 'data: {"type": "done", "data": {}}\n\n'
 
         return StreamingResponse(
             generate(),
@@ -455,12 +606,6 @@ def create_app() -> FastAPI:
             "total": len(_sessions),
             "total_messages": sum(s.get("message_count", 0) for s in _sessions.values()),
         }
-
-    @app.get("/api/sessions/{session_id}/export")
-    async def api_export_session(session_id: str):
-        if session_id not in _sessions:
-            raise HTTPException(404, "Session not found")
-        return _sessions[session_id]
 
     # ----- Config -----
 
@@ -574,31 +719,222 @@ def create_app() -> FastAPI:
         _save_config(os.path.join(_hermes_home, "config.yaml"), _config)
         return {"model": model, "provider": provider}
 
-    # ----- Stubs -----
+    # ----- Tools -----
+
+    @app.get("/api/tools")
+    async def api_list_tools():
+        if not _registry:
+            return []
+        tools = []
+        for name in _registry.get_all_tool_names():
+            entry = _registry.get_entry(name)
+            schema = entry.schema if entry else {}
+            func = schema.get("function", {})
+            tools.append({
+                "name": name,
+                "description": func.get("description", ""),
+                "parameters": func.get("parameters", {}),
+                "emoji": entry.emoji if entry else "",
+            })
+        return tools
+
+    @app.get("/api/tools/toolsets")
+    async def api_list_toolsets():
+        return [
+            {"id": "memory", "name": "记忆系统", "emoji": "🧠", "tools": ["memory_add", "memory_replace", "memory_remove"]},
+            {"id": "todo", "name": "任务管理", "emoji": "📋", "tools": ["todo_write", "todo_read"]},
+            {"id": "skills", "name": "技能系统", "emoji": "🎯", "tools": ["skills_list", "skill_view", "skill_manage"]},
+            {"id": "cron", "name": "定时任务", "emoji": "⏰", "tools": ["cronjob"]},
+        ]
+
+    @app.post("/api/tools/dispatch")
+    async def api_dispatch_tool(request: Request):
+        """Manually dispatch a tool call."""
+        body = await request.json()
+        name = body.get("name")
+        arguments = body.get("arguments", {})
+        if not name:
+            raise HTTPException(400, "name is required")
+
+        # Inject home for skills tools
+        if name in ("skills_list", "skill_view", "skill_manage"):
+            arguments.setdefault("home", _hermes_home)
+
+        result = _registry.dispatch(name, arguments)
+        try:
+            return JSONResponse(content=json.loads(result))
+        except json.JSONDecodeError:
+            return JSONResponse(content={"raw": result})
+
+    # ----- Memory -----
+
+    @app.get("/api/memory")
+    async def api_get_memory():
+        from tools.memory_tool import get_memory_store
+        store = get_memory_store()
+        if not store:
+            return {"enabled": False}
+        data = store.get_all()
+        return {
+            "enabled": True,
+            "memory_entries": data["memory"],
+            "user_entries": data["user"],
+            "memory_count": len(data["memory"]),
+            "user_count": len(data["user"]),
+        }
+
+    @app.post("/memory/add")
+    async def api_memory_add(request: Request):
+        from tools.memory_tool import get_memory_store
+        store = get_memory_store()
+        if not store:
+            raise HTTPException(500, "Memory not initialized")
+        body = await request.json()
+        return JSONResponse(content=json.loads(store.add(
+            body.get("entry", ""), body.get("category", "memory")
+        )))
+
+    @app.post("/memory/replace")
+    async def api_memory_replace(request: Request):
+        from tools.memory_tool import get_memory_store
+        store = get_memory_store()
+        if not store:
+            raise HTTPException(500, "Memory not initialized")
+        body = await request.json()
+        return JSONResponse(content=json.loads(store.replace(
+            body.get("old", ""), body.get("new", ""), body.get("category", "memory")
+        )))
+
+    @app.post("/memory/remove")
+    async def api_memory_remove(request: Request):
+        from tools.memory_tool import get_memory_store
+        store = get_memory_store()
+        if not store:
+            raise HTTPException(500, "Memory not initialized")
+        body = await request.json()
+        return JSONResponse(content=json.loads(store.remove(
+            body.get("entry", ""), body.get("category", "memory")
+        )))
+
+    @app.post("/memory/reload")
+    async def api_memory_reload():
+        from tools.memory_tool import get_memory_store
+        store = get_memory_store()
+        if store:
+            store.load_from_disk()
+        return {"ok": True}
+
+    # ----- Skills -----
 
     @app.get("/api/skills")
     async def api_list_skills():
-        return []
+        from tools.skills_tool import skills_list
+        result = skills_list(home=_hermes_home)
+        try:
+            data = json.loads(result)
+            return data.get("result", data)
+        except json.JSONDecodeError:
+            return []
+
+    @app.get("/api/skills/{name}")
+    async def api_get_skill(name: str, file: str = ""):
+        from tools.skills_tool import skill_view
+        result = skill_view(name=name, home=_hermes_home, file=file)
+        try:
+            return JSONResponse(content=json.loads(result))
+        except json.JSONDecodeError:
+            return JSONResponse(content={"raw": result})
+
+    @app.post("/api/skills/manage")
+    async def api_manage_skill(request: Request):
+        from tools.skill_manager_tool import skill_manage
+        body = await request.json()
+        body["home"] = _hermes_home
+        result = skill_manage(**body)
+        try:
+            return JSONResponse(content=json.loads(result))
+        except json.JSONDecodeError:
+            return JSONResponse(content={"raw": result})
+
+    @app.delete("/api/skills/{name}")
+    async def api_delete_skill(name: str):
+        from tools.skill_manager_tool import skill_manage
+        result = skill_manage(action="delete", name=name, home=_hermes_home)
+        try:
+            return JSONResponse(content=json.loads(result))
+        except json.JSONDecodeError:
+            return JSONResponse(content={"raw": result})
 
     @app.get("/api/skills/hub/search")
     async def api_skills_hub_search(q: str = ""):
         return []
 
+    # ----- Cron Jobs -----
+
     @app.get("/api/cron/jobs")
     async def api_list_cron():
-        return []
+        from tools.cron import jobs as cron_jobs
+        return cron_jobs.list_jobs()
+
+    @app.post("/api/cron/jobs")
+    async def api_create_cron(request: Request):
+        from tools.cron import jobs as cron_jobs
+        body = await request.json()
+        try:
+            job = cron_jobs.create_job(
+                name=body.get("name", ""),
+                schedule=body.get("schedule", ""),
+                prompt=body.get("prompt", ""),
+                model=body.get("model", ""),
+                skill=body.get("skill", ""),
+                skill_input=body.get("skill_input", ""),
+            )
+            if body.get("paused"):
+                cron_jobs.pause_job(job["id"])
+            return job
+        except Exception as e:
+            raise HTTPException(400, str(e))
+
+    @app.post("/api/cron/jobs/{job_id}/pause")
+    async def api_pause_cron(job_id: str):
+        from tools.cron import jobs as cron_jobs
+        job = cron_jobs.pause_job(job_id)
+        if not job:
+            raise HTTPException(404, "Job not found")
+        return job
+
+    @app.post("/api/cron/jobs/{job_id}/resume")
+    async def api_resume_cron(job_id: str):
+        from tools.cron import jobs as cron_jobs
+        job = cron_jobs.resume_job(job_id)
+        if not job:
+            raise HTTPException(404, "Job not found")
+        return job
+
+    @app.delete("/api/cron/jobs/{job_id}")
+    async def api_delete_cron(job_id: str):
+        from tools.cron import jobs as cron_jobs
+        ok = cron_jobs.remove_job(job_id)
+        if not ok:
+            raise HTTPException(404, "Job not found")
+        return {"ok": True}
+
+    @app.post("/api/cron/jobs/{job_id}/run")
+    async def api_run_cron(job_id: str):
+        from tools.cron import jobs as cron_jobs
+        cron_jobs.mark_job_run(job_id)
+        job = cron_jobs.get_job(job_id)
+        if not job:
+            raise HTTPException(404, "Job not found")
+        return {"ok": True, "job": job}
+
+    # ----- MCP -----
 
     @app.get("/api/mcp/servers")
     async def api_list_mcp():
         return []
 
-    @app.get("/api/memory")
-    async def api_get_memory():
-        return {"enabled": False}
-
-    @app.get("/api/tools/toolsets")
-    async def api_list_toolsets():
-        return []
+    # ----- Logs -----
 
     @app.get("/api/logs")
     async def api_get_logs():
@@ -613,7 +949,7 @@ def create_app() -> FastAPI:
 
 
 def start_server() -> None:
-    global _hermes_home, _config, _env_vars
+    global _hermes_home, _config, _env_vars, _registry
 
     from android_bootstrap import bootstrap
     _hermes_home = bootstrap()
@@ -624,7 +960,6 @@ def start_server() -> None:
         _save_config(os.path.join(_hermes_home, "config.yaml"), _config)
 
     # Force-update model config to built-in Agnes AI defaults
-    # (upgrades old configs that had openrouter/auto)
     if _config.get("model", {}).get("default", "") != DEFAULT_MODEL:
         _config.setdefault("model", {})["default"] = DEFAULT_MODEL
         _config["model"]["provider"] = "agnes"
@@ -636,11 +971,32 @@ def start_server() -> None:
 
     _load_sessions_from_disk()
 
+    # Initialize tools system
+    logger.info("Initializing tool system...")
+    import tools  # Triggers all tool registrations
+    _registry = tools.registry
+
+    # Initialize memory
+    from tools.memory_tool import init_memory
+    init_memory(_hermes_home)
+    logger.info("Memory system initialized")
+
+    # Initialize cron scheduler
+    from tools.cron import jobs as cron_jobs
+    from tools.cronjob_tools import set_home
+    set_home(_hermes_home)
+    cron_jobs.init_jobs(_hermes_home)
+    logger.info("Cron scheduler initialized")
+
+    # Ensure skills directory exists
+    os.makedirs(os.path.join(_hermes_home, "skills"), exist_ok=True)
+
     logger.info(f"Hermes home: {_hermes_home}")
     logger.info(f"Loaded {len(_sessions)} sessions, {len(_env_vars)} env vars")
+    logger.info(f"Registered tools: {_registry.get_all_tool_names()}")
 
     app = create_app()
-    logger.info("Starting Hermes server on 127.0.0.1:9119")
+    logger.info("Starting Hermes server v0.3.0 on 127.0.0.1:9119")
 
     import uvicorn
     config = uvicorn.Config(

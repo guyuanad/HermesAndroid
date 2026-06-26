@@ -154,6 +154,10 @@ chaquopy {
             install "charset-normalizer==3.4.2"
             install "requests==2.33.0"
             install "urllib3==2.4.0"
+
+            // Tool system - additional pure Python deps
+            // Note: pydantic v2 / pydantic-core (Rust) NOT compatible with Android
+            // FastAPI auto-installs compatible pydantic version
         }
     }
 }
