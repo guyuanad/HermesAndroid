@@ -439,6 +439,7 @@ def create_app() -> FastAPI:
             "\n"
             "## 你的工具\n"
             "你可以通过工具调用（tool calls）来执行操作，而不仅仅是聊天：\n"
+            "- **获取时间** (current_time)：获取当前日期、时间和星期几。当你需要知道今天几号或星期几时，一定要先调用这个工具！\n"
             "- **记忆系统** (memory_add/memory_replace/memory_remove)：记住用户的重要信息和偏好，持久化保存\n"
             "- **任务管理** (todo_write/todo_read)：创建和管理待办事项列表\n"
             "- **技能系统** (skills_list/skill_view/skill_manage)：查看、创建和管理可复用的技能\n"
@@ -448,14 +449,15 @@ def create_app() -> FastAPI:
             "- **文件操作** (read_file/write_file/list_files)：读写本地文件\n"
             "\n"
             "## 使用原则\n"
-            "1. 主动使用工具：当用户分享重要信息时，用 memory_add 记住它；当用户提到待办事项时，用 todo_write 记录\n"
-            "2. 当需要最新信息时，用 web_search 搜索；当用户给你网址时，用 web_fetch 读取\n"
-            "3. 技能是可复用的操作模板，可以帮助你更好地完成特定类型的任务\n"
-            "4. 记忆分为两种：一般记忆(memory)和用户画像(user)，后者用于存储用户的偏好和个人信息\n"
-            "5. 如果用户要求定时执行某事，使用 cronjob 工具创建定时任务\n"
-            "6. 文件操作限制在 Hermes 主目录内，保证安全\n"
-            "7. 用中文回复用户\n"
-            "8. 你已经拥有上述工具，不需要说\"我没有工具\"。直接使用工具调用来完成用户的请求。"
+            "1. 当用户问\"今天是几号\"、\"现在几点\"、\"星期几\"时，必须先调用 current_time 工具获取准确时间，不要猜测！\n"
+            "2. 主动使用工具：当用户分享重要信息时，用 memory_add 记住它；当用户提到待办事项时，用 todo_write 记录\n"
+            "3. 当需要最新信息时，用 web_search 搜索；当用户给你网址时，用 web_fetch 读取\n"
+            "4. 技能是可复用的操作模板，可以帮助你更好地完成特定类型的任务\n"
+            "5. 记忆分为两种：一般记忆(memory)和用户画像(user)，后者用于存储用户的偏好和个人信息\n"
+            "6. 如果用户要求定时执行某事，使用 cronjob 工具创建定时任务\n"
+            "7. 文件操作限制在 Hermes 主目录内，保证安全\n"
+            "8. 用中文回复用户\n"
+            "9. 你已经拥有上述工具，不需要说\"我没有工具\"。直接使用工具调用来完成用户的请求。"
         )
 
         sys_parts = [default_system]
@@ -768,6 +770,7 @@ def create_app() -> FastAPI:
     @app.get("/api/tools/toolsets")
     async def api_list_toolsets():
         return [
+            {"id": "time", "name": "时间查询", "emoji": "🕐", "tools": ["current_time"]},
             {"id": "memory", "name": "记忆系统", "emoji": "🧠", "tools": ["memory_add", "memory_replace", "memory_remove"]},
             {"id": "todo", "name": "任务管理", "emoji": "📋", "tools": ["todo_write", "todo_read"]},
             {"id": "skills", "name": "技能系统", "emoji": "🎯", "tools": ["skills_list", "skill_view", "skill_manage"]},
