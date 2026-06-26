@@ -162,6 +162,18 @@ def _get_llm_config() -> tuple:
         base_url = "https://api.groq.com/openai/v1"
         if not user_key:
             api_key = _env_vars.get("GROQ_API_KEY", DEFAULT_API_KEY)
+    elif "openai" in provider:
+        base_url = "https://api.openai.com/v1"
+        if not user_key:
+            api_key = _env_vars.get("OPENAI_API_KEY", DEFAULT_API_KEY)
+    elif "anthropic" in provider:
+        base_url = "https://api.anthropic.com/v1"
+        if not user_key:
+            api_key = _env_vars.get("ANTHROPIC_API_KEY", DEFAULT_API_KEY)
+    elif "google" in provider:
+        base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+        if not user_key:
+            api_key = _env_vars.get("GOOGLE_API_KEY", DEFAULT_API_KEY)
     elif "openrouter" in provider:
         base_url = "https://openrouter.ai/api/v1"
         if not user_key:
@@ -283,6 +295,7 @@ def create_app() -> FastAPI:
         body = await request.json()
         session_id = body.get("session_id")
         message = body.get("message", "")
+        system_prompt = body.get("system_prompt", "")
 
         if not message:
             raise HTTPException(400, "message is required")
@@ -313,6 +326,9 @@ def create_app() -> FastAPI:
         session["updated_at"] = _now_iso()
 
         llm_messages = []
+        # Add system prompt if provided
+        if system_prompt:
+            llm_messages.append({"role": "system", "content": system_prompt})
         for m in session["messages"][-20:]:
             llm_messages.append({"role": m["role"], "content": m["content"]})
 
@@ -358,7 +374,15 @@ def create_app() -> FastAPI:
                 session["updated_at"] = _now_iso()
                 _persist_session(session)
 
-        return StreamingResponse(generate(), media_type="text/event-stream")
+        return StreamingResponse(
+            generate(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "Connection": "keep-alive",
+            },
+        )
 
     # ----- Sessions -----
 
@@ -465,8 +489,9 @@ def create_app() -> FastAPI:
     @app.get("/api/env")
     async def api_get_env():
         known_keys = [
-            "OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
-            "GOOGLE_API_KEY", "GROQ_API_KEY", "OPENAI_BASE_URL",
+            "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY",
+            "GROQ_API_KEY", "DEEPSEEK_API_KEY", "SILICONFLOW_API_KEY",
+            "OPENROUTER_API_KEY", "OPENAI_BASE_URL",
         ]
         result = []
         for k in known_keys:
@@ -509,17 +534,25 @@ def create_app() -> FastAPI:
         return [
             {"id": "agnes-2.0-flash", "name": "Agnes 2.0 Flash (免费)", "provider": "agnes",
              "context_length": 128000, "supports_vision": False, "supports_tools": True},
-            {"id": "openrouter/auto", "name": "Auto (OpenRouter)", "provider": "openrouter",
+            {"id": "gpt-4o", "name": "GPT-4o", "provider": "openai",
              "context_length": 128000, "supports_vision": True, "supports_tools": True},
-            {"id": "openai/gpt-4o", "name": "GPT-4o", "provider": "openrouter",
+            {"id": "gpt-4o-mini", "name": "GPT-4o Mini", "provider": "openai",
              "context_length": 128000, "supports_vision": True, "supports_tools": True},
-            {"id": "openai/gpt-4o-mini", "name": "GPT-4o Mini", "provider": "openrouter",
-             "context_length": 128000, "supports_vision": True, "supports_tools": True},
-            {"id": "anthropic/claude-sonnet-4", "name": "Claude Sonnet 4", "provider": "openrouter",
+            {"id": "gpt-4.1", "name": "GPT-4.1", "provider": "openai",
+             "context_length": 1047576, "supports_vision": True, "supports_tools": True},
+            {"id": "gpt-4.1-mini", "name": "GPT-4.1 Mini", "provider": "openai",
+             "context_length": 1047576, "supports_vision": True, "supports_tools": True},
+            {"id": "claude-sonnet-4-20250514", "name": "Claude Sonnet 4", "provider": "anthropic",
              "context_length": 200000, "supports_vision": True, "supports_tools": True},
-            {"id": "google/gemini-2.5-pro", "name": "Gemini 2.5 Pro", "provider": "openrouter",
-             "context_length": 1000000, "supports_vision": True, "supports_tools": True},
-            {"id": "deepseek/deepseek-chat", "name": "DeepSeek V3", "provider": "openrouter",
+            {"id": "claude-3-5-haiku-20241022", "name": "Claude 3.5 Haiku", "provider": "anthropic",
+             "context_length": 200000, "supports_vision": True, "supports_tools": True},
+            {"id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro", "provider": "google",
+             "context_length": 1048576, "supports_vision": True, "supports_tools": True},
+            {"id": "gemini-2.5-flash", "name": "Gemini 2.5 Flash", "provider": "google",
+             "context_length": 1048576, "supports_vision": True, "supports_tools": True},
+            {"id": "deepseek-chat", "name": "DeepSeek V3", "provider": "deepseek",
+             "context_length": 65536, "supports_vision": False, "supports_tools": True},
+            {"id": "deepseek-reasoner", "name": "DeepSeek R1", "provider": "deepseek",
              "context_length": 65536, "supports_vision": False, "supports_tools": True},
         ]
 
