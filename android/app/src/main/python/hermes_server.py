@@ -431,8 +431,29 @@ def create_app() -> FastAPI:
         # Build LLM messages
         llm_messages = []
 
-        # System prompt with memory context
-        sys_parts = []
+        # Build default system prompt with tool awareness
+        default_system = (
+            "你是 Hermes 智能助手，一个自我进化的 AI Agent。你运行在 Android 设备上，具备以下核心能力：\n"
+            "\n"
+            "## 你的工具\n"
+            "你可以通过工具调用（tool calls）来执行操作，而不仅仅是聊天：\n"
+            "- **记忆系统** (memory_add/memory_replace/memory_remove)：记住用户的重要信息和偏好，持久化保存\n"
+            "- **任务管理** (todo_write/todo_read)：创建和管理待办事项列表\n"
+            "- **技能系统** (skills_list/skill_view/skill_manage)：查看、创建和管理可复用的技能\n"
+            "- **定时任务** (cronjob)：创建和管理定时执行的任务\n"
+            "\n"
+            "## 使用原则\n"
+            "1. 主动使用工具：当用户分享重要信息时，用 memory_add 记住它；当用户提到待办事项时，用 todo_write 记录\n"
+            "2. 技能是可复用的操作模板，可以帮助你更好地完成特定类型的任务\n"
+            "3. 记忆分为两种：一般记忆(memory)和用户画像(user)，后者用于存储用户的偏好和个人信息\n"
+            "4. 如果用户要求定时执行某事，使用 cronjob 工具创建定时任务\n"
+            "5. 用中文回复用户\n"
+            "6. 你已经拥有上述工具，不需要说\"我没有工具\"。直接使用工具调用来完成用户的请求。"
+        )
+
+        sys_parts = [default_system]
+
+        # Add user's custom system prompt
         if system_prompt:
             sys_parts.append(system_prompt)
 
@@ -452,8 +473,7 @@ def create_app() -> FastAPI:
             if todo_context:
                 sys_parts.append(todo_context)
 
-        if sys_parts:
-            llm_messages.append({"role": "system", "content": "\n\n".join(sys_parts)})
+        llm_messages.append({"role": "system", "content": "\n\n".join(sys_parts)})
 
         for m in session["messages"][-20:]:
             llm_messages.append({"role": m["role"], "content": m["content"]})
