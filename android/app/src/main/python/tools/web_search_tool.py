@@ -1,7 +1,7 @@
 """Web Search Tool for Hermes Android.
 
 Provides web search capability using httpx.
-Prioritizes China-accessible search engines (Baidu, Sogou).
+Prioritizes China-accessible search engines (Baidu).
 Falls back to Bing, DDG, Wikipedia for international users.
 No API key required.
 """
@@ -30,8 +30,18 @@ HEADERS_BROWSER = {
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
 }
 
-# Diagnostics: track which engines were tried and what happened
 _search_diagnostics: List[str] = []
+
+
+def _clean_html(text: str) -> str:
+    """Remove HTML tags and clean up text."""
+    text = re.sub(r'<[^>]+>', '', text)
+    text = text.replace('&nbsp;', ' ').replace('&amp;', '&')
+    text = text.replace('&lt;', '<').replace('&gt;', '>')
+    text = text.replace('&quot;', '"').replace('&#39;', "'")
+    text = text.replace('&#34;', '"').replace('&#x27;', "'")
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -39,14 +49,18 @@ _search_diagnostics: List[str] = []
 # ---------------------------------------------------------------------------
 
 def _search_baidu(query: str, max_results: int = 8) -> List[Dict[str, str]]:
-    """Search Baidu - most reliable in China."""
+    """Search Baidu - most reliable in China.
+
+    Baidu's HTML structure changes frequently. We use multiple
+    parsing strategies to maximize result extraction.
+    """
     results = []
-    _search_diagnostics.append(f"Baidu: starting query='{query}'")
+    _search_diagnostics.append(f"Baidu: query='{query}'")
     try:
         url = "https://www.baidu.com/s"
         params = {
             "wd": query,
-            "rn": str(max_results),
+            "rn": str(min(max_results, 50)),
             "ie": "utf-8",
         }
         with httpx.Client(
@@ -61,59 +75,160 @@ def _search_baidu(query: str, max_results: int = 8) -> List[Dict[str, str]]:
                 return results
 
             html = resp.text
+            seen_urls = set()
 
-            # Baidu search results:
-            # Each result in <div class="result c-container"> or <div class="c-container">
-            # Title: <h3 class="c-title"> containing <a href="...">
-            # Snippet: <span class="content-right_8Zs40"> or class="c-gap-top-small" or <div class="c-abstract">
-
-            # Method 1: Parse using h3 title links (most reliable)
-            # Baidu format: <h3 class="..."><a href="http://www.baidu.com/link?url=..." target="_blank">Title</a></h3>
-            title_pattern = re.compile(
-                r'<h3[^>]*class="[^"]*t[^"]*"[^>]*>\s*<a[^>]*href="([^"]*)"[^>]*>(.*?)</a>\s*</h3>',
+            # ---- Strategy 1: mu + title pattern ----
+            # Baidu wraps results in containers with mu attribute:
+            # <div mu="https://..." > ... <h3 class="t"> <a href="...">Title</a> </h3> ...
+            # or <h3 class="c-title"> ...
+            container_pattern = re.compile(
+                r'<div[^>]*mu="(https?://[^"]*)"[^>]*>(.*?)</div>\s*(?=<div[^>]*mu=|$)',
                 re.DOTALL,
             )
+            for container_match in container_pattern.finditer(html):
+                mu_url = container_match.group(1)
+                block = container_match.group(2)
 
-            # Abstract/snippet patterns
-            abstract_pattern = re.compile(
-                r'<span[^>]*class="[^"]*(?:content-right|c-abstract|c-gap-top)[^"]*"[^>]*>(.*?)</span>',
-                re.DOTALL,
-            )
+                # Find title link
+                title_match = re.search(
+                    r'<h3[^>]*>\s*<a[^>]*href="([^"]*)"[^>]*>(.*?)</a>',
+                    block, re.DOTALL,
+                )
+                if not title_match:
+                    # Try without h3 wrapper
+                    title_match = re.search(
+                        r'<a[^>]*href="(https?://[^"]*)"[^>]*data-click[^>]*>(.*?)</a>',
+                        block, re.DOTALL,
+                    )
 
-            titles = list(title_pattern.finditer(html))
+                if title_match:
+                    link = title_match.group(1).strip()
+                    title = _clean_html(title_match.group(2))
 
-            for i, match in enumerate(titles[:max_results]):
-                link_url = match.group(1).strip()
-                title = re.sub(r'<[^>]+>', '', match.group(2)).strip()
+                    # Use mu URL if link is a Baidu redirect
+                    real_url = mu_url if 'baidu.com/link' in link else link
 
-                # Baidu uses redirect URLs, keep as-is (they resolve to real URLs)
-                if link_url.startswith("/"):
-                    link_url = "https://www.baidu.com" + link_url
+                    if title and len(title) > 2 and real_url not in seen_urls:
+                        # Find snippet
+                        snippet = ""
+                        snippet_match = re.search(
+                            r'<(?:span|div)[^>]*class="[^"]*(?:c-abstract|content-right_)[^"]*"[^>]*>(.*?)</(?:span|div)>',
+                            block, re.DOTALL,
+                        )
+                        if snippet_match:
+                            snippet = _clean_html(snippet_match.group(1))[:400]
 
-                # Try to find snippet near this title
-                snippet = ""
-                # Search for abstract after the title position
-                start_pos = match.end()
-                remaining = html[start_pos:start_pos + 2000]
-                snippet_match = abstract_pattern.search(remaining)
-                if snippet_match:
-                    snippet = re.sub(r'<[^>]+>', '', snippet_match.group(1)).strip()
-                else:
-                    # Fallback: any text in a span or div after title
-                    simple_match = re.search(r'<(?:span|div)[^>]*>(.*?)</(?:span|div)>', remaining, re.DOTALL)
-                    if simple_match:
-                        candidate = re.sub(r'<[^>]+>', '', simple_match.group(1)).strip()
-                        # Only use if it looks like a real snippet (more than 20 chars, not navigation)
-                        if len(candidate) > 20 and not candidate.startswith(('百度', '©', '京ICP')):
-                            snippet = candidate
+                        seen_urls.add(real_url)
+                        results.append({
+                            "title": title[:150],
+                            "url": real_url,
+                            "snippet": snippet,
+                            "source": "百度",
+                        })
 
-                if title and len(title) > 2:
+                if len(results) >= max_results:
+                    break
+
+            # ---- Strategy 2: Any h3 > a with data-click ----
+            if len(results) < max_results:
+                h3_pattern = re.compile(
+                    r'<h3[^>]*>\s*<a[^>]*href="([^"]*)"[^>]*(?:data-click|data-tt)[^>]*>(.*?)</a>\s*</h3>',
+                    re.DOTALL,
+                )
+                for match in h3_pattern.finditer(html):
+                    link = match.group(1).strip()
+                    title = _clean_html(match.group(2))
+
+                    # Skip Baidu internal and already seen
+                    if 'baidu.com' in link and '/link?' not in link:
+                        continue
+                    if any(title == r['title'] for r in results):
+                        continue
+
+                    # Resolve Baidu redirect URLs
+                    if '/link?' in link:
+                        real_url = link  # Keep redirect URL, browser resolves it
+                    else:
+                        real_url = link
+
+                    if title and len(title) > 2 and real_url not in seen_urls:
+                        seen_urls.add(real_url)
+                        results.append({
+                            "title": title[:150],
+                            "url": real_url,
+                            "snippet": "",
+                            "source": "百度",
+                        })
+
+                    if len(results) >= max_results:
+                        break
+
+            # ---- Strategy 3: Broadest - any meaningful <a> in result containers ----
+            if len(results) < max_results:
+                # Look for result containers and extract links
+                result_blocks = re.findall(
+                    r'<div[^>]*class="[^"]*result[^"]*c-container[^"]*"[^>]*>(.*?)</div>',
+                    html, re.DOTALL,
+                )
+                for block in result_blocks:
+                    link_match = re.search(
+                        r'<a[^>]*href="(https?://[^"]*)"[^>]*>(.*?)</a>',
+                        block, re.DOTALL,
+                    )
+                    if not link_match:
+                        continue
+
+                    link = link_match.group(1).strip()
+                    title = _clean_html(link_match.group(2))
+
+                    # Skip Baidu internal, short titles, duplicates
+                    if any(d in link for d in ['baidu.com/s?', 'baidu.com/home', 'baidu.com/gaoji']):
+                        continue
+                    if len(title) < 4:
+                        continue
+                    if any(title == r['title'] for r in results):
+                        continue
+                    if link in seen_urls:
+                        continue
+
+                    seen_urls.add(link)
                     results.append({
                         "title": title[:150],
-                        "url": link_url,
-                        "snippet": snippet[:400] if snippet else "",
+                        "url": link,
+                        "snippet": "",
                         "source": "百度",
                     })
+
+                    if len(results) >= max_results:
+                        break
+
+            # ---- Strategy 4: Last resort - scan all links ----
+            if len(results) < 3:
+                all_links = re.findall(
+                    r'<a[^>]*href="(https?://(?!baidu\.com)[^"]*)"[^>]*>(.*?)</a>',
+                    html, re.DOTALL,
+                )
+                for link, raw_title in all_links:
+                    title = _clean_html(raw_title)
+                    if len(title) < 6:
+                        continue
+                    if any(d in link for d in ['baidu.com', 'google.com', 'bing.com']):
+                        continue
+                    if any(title == r['title'] for r in results):
+                        continue
+                    if link in seen_urls:
+                        continue
+
+                    seen_urls.add(link)
+                    results.append({
+                        "title": title[:150],
+                        "url": link,
+                        "snippet": "",
+                        "source": "百度",
+                    })
+
+                    if len(results) >= max_results:
+                        break
 
             _search_diagnostics.append(f"Baidu: found {len(results)} results")
 
@@ -131,7 +246,7 @@ def _search_baidu(query: str, max_results: int = 8) -> List[Dict[str, str]]:
 def _search_bing(query: str, max_results: int = 8) -> List[Dict[str, str]]:
     """Search Bing."""
     results = []
-    _search_diagnostics.append(f"Bing: starting")
+    _search_diagnostics.append("Bing: starting")
     try:
         url = "https://www.bing.com/search"
         params = {"q": query}
@@ -147,8 +262,10 @@ def _search_bing(query: str, max_results: int = 8) -> List[Dict[str, str]]:
                 return results
 
             html = resp.text
-            blocks = re.findall(r'<li class="b_algo"[^>]*>(.*?)</li>', html, re.DOTALL)
+            seen_urls = set()
 
+            # Strategy 1: b_algo blocks
+            blocks = re.findall(r'<li class="b_algo"[^>]*>(.*?)</li>', html, re.DOTALL)
             for block in blocks[:max_results]:
                 title_match = re.search(
                     r'<h2[^>]*>\s*<a[^>]*href="([^"]*)"[^>]*>(.*?)</a>\s*</h2>',
@@ -157,27 +274,48 @@ def _search_bing(query: str, max_results: int = 8) -> List[Dict[str, str]]:
                 if not title_match:
                     continue
 
-                link_url = title_match.group(1).strip()
-                title = re.sub(r'<[^>]+>', '', title_match.group(2)).strip()
+                link = title_match.group(1).strip()
+                title = _clean_html(title_match.group(2))
 
-                if not link_url or 'bing.com' in link_url:
+                if not link or 'bing.com' in link or link in seen_urls:
                     continue
 
                 snippet = ""
                 snippet_match = re.search(
-                    r'<div class="b_caption[^"]*"[^>]*>.*?<p[^>]*>(.*?)</p>',
+                    r'<p[^>]*>(.*?)</p>',
                     block, re.DOTALL,
                 )
                 if snippet_match:
-                    snippet = re.sub(r'<[^>]+>', '', snippet_match.group(1)).strip()
+                    snippet = _clean_html(snippet_match.group(1))[:400]
 
+                seen_urls.add(link)
                 if title:
                     results.append({
                         "title": title[:150],
-                        "url": link_url,
-                        "snippet": snippet[:400] if snippet else "",
+                        "url": link,
+                        "snippet": snippet,
                         "source": "Bing",
                     })
+
+            # Strategy 2: broader pattern if no results
+            if not results:
+                all_links = re.findall(
+                    r'<a[^>]*href="(https?://(?!bing\.com|microsoft\.com)[^"]*)"[^>]*>(.*?)</a>',
+                    html, re.DOTALL,
+                )
+                for link, raw_title in all_links:
+                    title = _clean_html(raw_title)
+                    if len(title) < 6 or link in seen_urls:
+                        continue
+                    seen_urls.add(link)
+                    results.append({
+                        "title": title[:150],
+                        "url": link,
+                        "snippet": "",
+                        "source": "Bing",
+                    })
+                    if len(results) >= max_results:
+                        break
 
             _search_diagnostics.append(f"Bing: found {len(results)} results")
 
@@ -195,7 +333,7 @@ def _search_bing(query: str, max_results: int = 8) -> List[Dict[str, str]]:
 def _search_ddg_lite(query: str, max_results: int = 8) -> List[Dict[str, str]]:
     """Search DuckDuckGo Lite."""
     results = []
-    _search_diagnostics.append(f"DDG Lite: starting")
+    _search_diagnostics.append("DDG Lite: starting")
     try:
         url = "https://lite.duckduckgo.com/lite/"
         data = {"q": query}
@@ -211,35 +349,27 @@ def _search_ddg_lite(query: str, max_results: int = 8) -> List[Dict[str, str]]:
                 return results
 
             html = resp.text
+            seen = set()
 
-            # DDG Lite: look for any <a> with href containing real URLs
-            # The structure is simple <table><tr><td>... format
+            # Grab all external links
             link_pattern = re.compile(
-                r'<a[^>]*href="(https?://[^"]*)"[^>]*>(.*?)</a>',
+                r'<a[^>]*href="(https?://(?!duckduckgo\.com|ddg\.gg)[^"]*)"[^>]*>(.*?)</a>',
                 re.DOTALL,
             )
-
-            seen = set()
             for match in link_pattern.finditer(html):
-                link_url = match.group(1).strip()
-                title = re.sub(r'<[^>]+>', '', match.group(2)).strip()
+                link = match.group(1).strip()
+                title = _clean_html(match.group(2))
 
-                # Skip DDG internal URLs
-                if any(d in link_url for d in ['duckduckgo.com', 'ddg.gg']):
+                if link in seen or len(title) < 4:
                     continue
-                if link_url in seen:
-                    continue
+                seen.add(link)
 
-                seen.add(link_url)
-
-                if title and len(title) > 3:
-                    results.append({
-                        "title": title[:150],
-                        "url": link_url,
-                        "snippet": "",
-                        "source": "DuckDuckGo",
-                    })
-
+                results.append({
+                    "title": title[:150],
+                    "url": link,
+                    "snippet": "",
+                    "source": "DuckDuckGo",
+                })
                 if len(results) >= max_results:
                     break
 
@@ -259,7 +389,7 @@ def _search_ddg_lite(query: str, max_results: int = 8) -> List[Dict[str, str]]:
 def _search_wikipedia(query: str, max_results: int = 5) -> List[Dict[str, str]]:
     """Search Wikipedia."""
     results = []
-    _search_diagnostics.append(f"Wikipedia: starting")
+    _search_diagnostics.append("Wikipedia: starting")
     for lang in ("zh", "en"):
         try:
             params = {
@@ -273,8 +403,6 @@ def _search_wikipedia(query: str, max_results: int = 5) -> List[Dict[str, str]]:
             api_url = f"https://{lang}.wikipedia.org/w/api.php"
             with httpx.Client(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
                 resp = client.get(api_url, params=params)
-                _search_diagnostics.append(f"Wikipedia {lang}: HTTP {resp.status_code}")
-
                 if resp.status_code != 200:
                     continue
 
@@ -350,7 +478,7 @@ def web_search(query: str, max_results: int = 5) -> str:
         max_results: Maximum number of results to return
     """
     global _search_diagnostics
-    _search_diagnostics = []  # Reset diagnostics
+    _search_diagnostics = []
 
     if not query.strip():
         return tool_error("Search query is required")
@@ -360,19 +488,19 @@ def web_search(query: str, max_results: int = 5) -> str:
 
     def add_results(new_results: List[Dict[str, str]]) -> None:
         for r in new_results:
-            url = r.get("url", "")
-            if url and url not in seen_urls:
+            u = r.get("url", "")
+            if u and u not in seen_urls:
                 all_results.append(r)
-                seen_urls.add(url)
+                seen_urls.add(u)
 
-    # Tier 1: Baidu (best for China users)
+    # Tier 1: Baidu (best for China)
     add_results(_search_baidu(query, max_results))
 
-    # Tier 2: Bing (good international search)
+    # Tier 2: Bing
     if len(all_results) < max_results:
         add_results(_search_bing(query, max_results))
 
-    # Tier 3: DDG Lite (backup)
+    # Tier 3: DDG Lite
     if len(all_results) < max_results:
         add_results(_search_ddg_lite(query, max_results))
 
@@ -383,7 +511,6 @@ def web_search(query: str, max_results: int = 5) -> str:
     final = all_results[:max_results]
 
     if not final:
-        # Return diagnostics to help debug
         return tool_result({
             "query": query,
             "results": [],
@@ -392,16 +519,15 @@ def web_search(query: str, max_results: int = 5) -> str:
             "diagnostics": _search_diagnostics,
         })
 
-    # Include diagnostics for transparency
     result_data = {
         "query": query,
         "results": final,
         "count": len(final),
     }
 
-    # Only include diagnostics if there were issues
-    failed_engines = [d for d in _search_diagnostics if "error" in d.lower() or "found 0" in d.lower()]
-    if failed_engines:
+    # Include diagnostics if some engines failed
+    failed = [d for d in _search_diagnostics if "error" in d.lower() or "found 0" in d.lower()]
+    if failed:
         result_data["diagnostics"] = _search_diagnostics
 
     return tool_result(result_data)
