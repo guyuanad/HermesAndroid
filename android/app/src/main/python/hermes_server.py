@@ -111,7 +111,7 @@ def _persist_session(session: dict) -> None:
     sid = session["id"]
     path = os.path.join(sessions_dir, f"{sid}.json")
     with open(path, "w") as f:
-        json.dump(session, f, indent=2, default=str)
+        json.dump(session, f, indent=2, default=str, ensure_ascii=False)
 
 
 def _load_sessions_from_disk() -> None:
@@ -317,7 +317,7 @@ async def _call_llm_stream(messages: List[dict], model: str, api_key: str, base_
                         error_msg = error_json.get("error", {}).get("message", error_text.decode())
                     except Exception:
                         error_msg = error_text.decode()
-                    yield f'data: {json.dumps({"type": "error", "data": {"text": f"API Error ({response.status_code}): {error_msg}"}})}\n\n'
+                    yield f'data: {json.dumps({"type": "error", "data": {"text": f"API Error ({response.status_code}): {error_msg}"}}, ensure_ascii=False)}\n\n'
                     return
 
                 async for line in response.aiter_lines():
@@ -331,17 +331,17 @@ async def _call_llm_stream(messages: List[dict], model: str, api_key: str, base_
                         delta = chunk.get("choices", [{}])[0].get("delta", {})
                         content = delta.get("content", "")
                         if content:
-                            yield f'data: {json.dumps({"type": "text_delta", "data": {"text": content}})}\n\n'
+                            yield f'data: {json.dumps({"type": "text_delta", "data": {"text": content}}, ensure_ascii=False)}\n\n'
                     except json.JSONDecodeError:
                         pass
 
         yield 'data: {"type": "done", "data": {}}\n\n'
 
     except httpx.ConnectError as e:
-        yield f'data: {json.dumps({"type": "error", "data": {"text": f"Connection error: {e}"}})}\n\n'
+        yield f'data: {json.dumps({"type": "error", "data": {"text": f"Connection error: {e}"}}, ensure_ascii=False)}\n\n'
     except Exception as e:
         logger.error(f"LLM call failed: {e}")
-        yield f'data: {json.dumps({"type": "error", "data": {"text": str(e)}})}\n\n'
+        yield f'data: {json.dumps({"type": "error", "data": {"text": str(e)}}, ensure_ascii=False)}\n\n'
 
 
 # ---------------------------------------------------------------------------
@@ -498,7 +498,7 @@ def create_app() -> FastAPI:
             session["message_count"] += 1
             _persist_session(session)
             return StreamingResponse(
-                iter([f'data: {json.dumps({"type": "text_delta", "data": {"text": error_msg}})}\n\n',
+                iter([f'data: {json.dumps({"type": "text_delta", "data": {"text": error_msg}}, ensure_ascii=False)}\n\n',
                       'data: {"type": "done", "data": {}}\n\n']),
                 media_type="text/event-stream",
             )
@@ -544,11 +544,11 @@ def create_app() -> FastAPI:
             chunk_size = 50
             for i in range(0, len(response_text), chunk_size):
                 chunk = response_text[i:i + chunk_size]
-                yield f'data: {json.dumps({"type": "text_delta", "data": {"text": chunk}})}\n\n'
+                yield f'data: {json.dumps({"type": "text_delta", "data": {"text": chunk}}, ensure_ascii=False)}\n\n'
                 await asyncio.sleep(0.01)
 
             if tool_calls_log:
-                yield f'data: {json.dumps({"type": "tool_calls", "data": {"calls": tool_calls_log}})}\n\n'
+                yield f'data: {json.dumps({"type": "tool_calls", "data": {"calls": tool_calls_log}}, ensure_ascii=False)}\n\n'
 
             yield 'data: {"type": "done", "data": {}}\n\n'
 

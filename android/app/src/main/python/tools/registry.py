@@ -24,12 +24,12 @@ logger = logging.getLogger("hermes.tools")
 
 def tool_error(msg: str) -> str:
     """Return a JSON error string for tool results."""
-    return json.dumps({"error": msg})
+    return json.dumps({"error": msg}, ensure_ascii=False)
 
 
 def tool_result(data: Any) -> str:
     """Return a JSON result string for tool results."""
-    return json.dumps({"result": data})
+    return json.dumps({"result": data}, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------------
