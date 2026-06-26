@@ -259,6 +259,8 @@ async def _call_llm_with_tools(
                     # Inject home directory for tools that need it
                     if tool_name in ("skills_list", "skill_view", "skill_manage"):
                         tool_args.setdefault("home", _hermes_home)
+                    if tool_name == "list_files" and "path" not in tool_args:
+                        tool_args["path"] = ""
 
                     # Dispatch tool
                     logger.info(f"Tool call: {tool_name}({tool_args})")
@@ -441,14 +443,19 @@ def create_app() -> FastAPI:
             "- **任务管理** (todo_write/todo_read)：创建和管理待办事项列表\n"
             "- **技能系统** (skills_list/skill_view/skill_manage)：查看、创建和管理可复用的技能\n"
             "- **定时任务** (cronjob)：创建和管理定时执行的任务\n"
+            "- **网页搜索** (web_search)：搜索网络获取最新信息\n"
+            "- **网页读取** (web_fetch)：读取网页内容\n"
+            "- **文件操作** (read_file/write_file/list_files)：读写本地文件\n"
             "\n"
             "## 使用原则\n"
             "1. 主动使用工具：当用户分享重要信息时，用 memory_add 记住它；当用户提到待办事项时，用 todo_write 记录\n"
-            "2. 技能是可复用的操作模板，可以帮助你更好地完成特定类型的任务\n"
-            "3. 记忆分为两种：一般记忆(memory)和用户画像(user)，后者用于存储用户的偏好和个人信息\n"
-            "4. 如果用户要求定时执行某事，使用 cronjob 工具创建定时任务\n"
-            "5. 用中文回复用户\n"
-            "6. 你已经拥有上述工具，不需要说\"我没有工具\"。直接使用工具调用来完成用户的请求。"
+            "2. 当需要最新信息时，用 web_search 搜索；当用户给你网址时，用 web_fetch 读取\n"
+            "3. 技能是可复用的操作模板，可以帮助你更好地完成特定类型的任务\n"
+            "4. 记忆分为两种：一般记忆(memory)和用户画像(user)，后者用于存储用户的偏好和个人信息\n"
+            "5. 如果用户要求定时执行某事，使用 cronjob 工具创建定时任务\n"
+            "6. 文件操作限制在 Hermes 主目录内，保证安全\n"
+            "7. 用中文回复用户\n"
+            "8. 你已经拥有上述工具，不需要说\"我没有工具\"。直接使用工具调用来完成用户的请求。"
         )
 
         sys_parts = [default_system]
@@ -765,6 +772,8 @@ def create_app() -> FastAPI:
             {"id": "todo", "name": "任务管理", "emoji": "📋", "tools": ["todo_write", "todo_read"]},
             {"id": "skills", "name": "技能系统", "emoji": "🎯", "tools": ["skills_list", "skill_view", "skill_manage"]},
             {"id": "cron", "name": "定时任务", "emoji": "⏰", "tools": ["cronjob"]},
+            {"id": "search", "name": "网页搜索", "emoji": "🔍", "tools": ["web_search", "web_fetch"]},
+            {"id": "files", "name": "文件操作", "emoji": "📄", "tools": ["read_file", "write_file", "list_files"]},
         ]
 
     @app.post("/api/tools/dispatch")
@@ -779,6 +788,8 @@ def create_app() -> FastAPI:
         # Inject home for skills tools
         if name in ("skills_list", "skill_view", "skill_manage"):
             arguments.setdefault("home", _hermes_home)
+        if name == "list_files" and "path" not in arguments:
+            arguments["path"] = ""
 
         result = _registry.dispatch(name, arguments)
         try:
@@ -1003,10 +1014,15 @@ def start_server() -> None:
 
     # Initialize cron scheduler
     from tools.cron import jobs as cron_jobs
-    from tools.cronjob_tools import set_home
-    set_home(_hermes_home)
+    from tools.cronjob_tools import set_home as cron_set_home
+    cron_set_home(_hermes_home)
     cron_jobs.init_jobs(_hermes_home)
     logger.info("Cron scheduler initialized")
+
+    # Initialize file tools
+    from tools.file_tools import set_home as file_set_home
+    file_set_home(_hermes_home)
+    logger.info("File tools initialized")
 
     # Ensure skills directory exists
     os.makedirs(os.path.join(_hermes_home, "skills"), exist_ok=True)

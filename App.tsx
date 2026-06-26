@@ -231,7 +231,7 @@ function App() {
   }
 
   if (screen === 'tools') {
-    return <ToolsScreen onBack={() => setScreen('chat')} />;
+    return <ToolsScreen onBack={() => setScreen('chat')} onNavigate={(s: Screen) => setScreen(s)} />;
   }
 
   if (screen === 'memory') {
@@ -514,7 +514,7 @@ function ChatScreen({
 // Tools Screen
 // ---------------------------------------------------------------------------
 
-function ToolsScreen({ onBack }: { onBack: () => void }) {
+function ToolsScreen({ onBack, onNavigate }: { onBack: () => void; onNavigate: (screen: Screen) => void }) {
   const [tools, setTools] = useState<any[]>([]);
   const [toolsets, setToolsets] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -547,7 +547,7 @@ function ToolsScreen({ onBack }: { onBack: () => void }) {
         <View style={s.featureGrid}>
           <TouchableOpacity
             style={s.featureCard}
-            onPress={() => { /* navigate to memory screen - handled by parent */ }}
+            onPress={() => onNavigate('memory')}
           >
             <Text style={s.featureEmoji}>🧠</Text>
             <Text style={s.featureName}>记忆系统</Text>
@@ -563,7 +563,7 @@ function ToolsScreen({ onBack }: { onBack: () => void }) {
           </TouchableOpacity>
           <TouchableOpacity
             style={s.featureCard}
-            onPress={() => {}}
+            onPress={() => onNavigate('skills')}
           >
             <Text style={s.featureEmoji}>🎯</Text>
             <Text style={s.featureName}>技能系统</Text>
@@ -571,7 +571,7 @@ function ToolsScreen({ onBack }: { onBack: () => void }) {
           </TouchableOpacity>
           <TouchableOpacity
             style={s.featureCard}
-            onPress={() => {}}
+            onPress={() => onNavigate('cron')}
           >
             <Text style={s.featureEmoji}>⏰</Text>
             <Text style={s.featureName}>定时任务</Text>

@@ -11,5 +11,7 @@ import tools.memory_tool
 import tools.skills_tool
 import tools.skill_manager_tool
 import tools.cronjob_tools
+import tools.web_search_tool
+import tools.file_tools
 
 __all__ = ["registry", "tool_error", "tool_result"]
