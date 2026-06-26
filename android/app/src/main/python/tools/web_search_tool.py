@@ -1,7 +1,7 @@
 """Web Search Tool for Hermes Android.
 
-Provides web search capability using httpx to query search engines.
-Supports multiple free search backends (DuckDuckGo, Wikipedia).
+Provides web search capability using httpx.
+Uses multiple reliable search backends with robust HTML parsing.
 No API key required.
 """
 
@@ -20,17 +20,163 @@ from tools.registry import registry, tool_error, tool_result
 logger = logging.getLogger("hermes.tools.web_search")
 
 # ---------------------------------------------------------------------------
-# DuckDuckGo Instant Answer API (free, no key)
+# Constants
 # ---------------------------------------------------------------------------
 
-DDG_API = "https://api.duckduckgo.com/"
-DDG_HTML = "https://html.duckduckgo.com/html/"
-WIKI_API = "https://zh.wikipedia.org/api/rest_v1/page/summary/"
-WIKI_SEARCH = "https://zh.wikipedia.org/w/api.php"
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.6422.113 Mobile Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+}
 
 
-def _search_duckduckgo(query: str, max_results: int = 5) -> List[Dict[str, str]]:
-    """Search DuckDuckGo Instant Answer API."""
+# ---------------------------------------------------------------------------
+# Bing Search (most reliable HTML search)
+# ---------------------------------------------------------------------------
+
+def _search_bing(query: str, max_results: int = 8) -> List[Dict[str, str]]:
+    """Search Bing and parse HTML results. Most reliable free search."""
+    results = []
+    try:
+        url = "https://www.bing.com/search"
+        params = {
+            "q": query,
+            "setlang": "zh-Hans",
+            "cc": "CN",
+        }
+        with httpx.Client(
+            timeout=httpx.Timeout(15.0, connect=8.0),
+            follow_redirects=True,
+            headers=HEADERS,
+        ) as client:
+            resp = client.get(url, params=params)
+            if resp.status_code != 200:
+                logger.warning(f"Bing returned {resp.status_code}")
+                return results
+
+            html = resp.text
+
+            # Bing results are in <li class="b_algo"> blocks
+            # Title: <h2><a href="URL">Title</a></h2>
+            # Snippet: <div class="b_caption"><p>...</p> or <p class="b_lineclamp2">
+
+            # Extract result blocks
+            blocks = re.findall(r'<li class="b_algo"[^>]*>(.*?)</li>', html, re.DOTALL)
+
+            for block in blocks[:max_results]:
+                # Extract title and URL
+                title_match = re.search(r'<h2[^>]*>\s*<a[^>]*href="([^"]*)"[^>]*>(.*?)</a>\s*</h2>', block, re.DOTALL)
+                if not title_match:
+                    continue
+
+                url = title_match.group(1).strip()
+                title = re.sub(r'<[^>]+>', '', title_match.group(2)).strip()
+
+                # Skip Bing internal URLs
+                if not url or 'bing.com' in url or 'microsoft.com' in url.lower():
+                    continue
+
+                # Extract snippet
+                snippet = ""
+                # Try b_caption first
+                snippet_match = re.search(r'<div class="b_caption[^"]*"[^>]*>.*?<p[^>]*>(.*?)</p>', block, re.DOTALL)
+                if snippet_match:
+                    snippet = re.sub(r'<[^>]+>', '', snippet_match.group(1)).strip()
+                else:
+                    # Try any <p> in the block
+                    snippet_match = re.search(r'<p[^>]*class="[^"]*lineclamp[^"]*"[^>]*>(.*?)</p>', block, re.DOTALL)
+                    if snippet_match:
+                        snippet = re.sub(r'<[^>]+>', '', snippet_match.group(1)).strip()
+
+                if title:
+                    results.append({
+                        "title": title[:150],
+                        "url": url,
+                        "snippet": snippet[:400] if snippet else "",
+                        "source": "Bing",
+                    })
+
+    except Exception as e:
+        logger.error(f"Bing search error: {e}")
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# DuckDuckGo Lite (simpler HTML than regular DDG)
+# ---------------------------------------------------------------------------
+
+def _search_ddg_lite(query: str, max_results: int = 8) -> List[Dict[str, str]]:
+    """Search DuckDuckGo Lite (simple table-based HTML, easier to parse)."""
+    results = []
+    try:
+        url = "https://lite.duckduckgo.com/lite/"
+        data = {"q": query, "kl": "cn-zh"}
+        with httpx.Client(
+            timeout=httpx.Timeout(15.0, connect=8.0),
+            follow_redirects=True,
+            headers=HEADERS,
+        ) as client:
+            resp = client.post(url, data=data)
+            if resp.status_code != 200:
+                logger.warning(f"DDG Lite returned {resp.status_code}")
+                return results
+
+            html = resp.text
+
+            # DDG Lite uses a simple table structure:
+            # <tr> with result-link containing <a href="URL">Title</a>
+            # Next <tr> with result-snippet containing the snippet text
+
+            # Find all links in result rows
+            link_pattern = re.compile(
+                r'<a[^>]*class="result-link"[^>]*href="([^"]*)"[^>]*>(.*?)</a>',
+                re.DOTALL,
+            )
+            snippet_pattern = re.compile(
+                r'<td[^>]*class="result-snippet"[^>]*>(.*?)</td>',
+                re.DOTALL,
+            )
+
+            links = list(link_pattern.finditer(html))
+            snippets = list(snippet_pattern.finditer(html))
+
+            for i, match in enumerate(links[:max_results]):
+                url = match.group(1).strip()
+                title = re.sub(r'<[^>]+>', '', match.group(2)).strip()
+
+                # Extract actual URL from DDG redirect
+                if "//duckduckgo.com/lite/" in url or "//duckduckgo.com/?" in url:
+                    uddg = re.search(r'uddg=([^&]+)', url)
+                    if uddg:
+                        url = urllib.parse.unquote(uddg.group(1))
+                    else:
+                        continue
+
+                snippet = ""
+                if i < len(snippets):
+                    snippet = re.sub(r'<[^>]+>', '', snippets[i].group(1)).strip()
+
+                if title and url:
+                    results.append({
+                        "title": title[:150],
+                        "url": url,
+                        "snippet": snippet[:400] if snippet else "",
+                        "source": "DuckDuckGo",
+                    })
+
+    except Exception as e:
+        logger.error(f"DDG Lite search error: {e}")
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# DuckDuckGo Instant Answer API
+# ---------------------------------------------------------------------------
+
+def _search_ddg_api(query: str, max_results: int = 5) -> List[Dict[str, str]]:
+    """Search DuckDuckGo Instant Answer API (only returns direct answers)."""
     results = []
     try:
         params = {
@@ -40,14 +186,12 @@ def _search_duckduckgo(query: str, max_results: int = 5) -> List[Dict[str, str]]
             "skip_disambig": 1,
         }
         with httpx.Client(timeout=httpx.Timeout(15.0, connect=5.0)) as client:
-            resp = client.get(DDG_API, params=params)
+            resp = client.get("https://api.duckduckgo.com/", params=params)
             if resp.status_code != 200:
-                logger.warning(f"DDG API returned {resp.status_code}")
                 return results
 
             data = resp.json()
 
-            # Abstract (direct answer)
             if data.get("AbstractText"):
                 results.append({
                     "title": data.get("AbstractTitle", query),
@@ -56,7 +200,6 @@ def _search_duckduckgo(query: str, max_results: int = 5) -> List[Dict[str, str]]
                     "source": data.get("AbstractSource", "DuckDuckGo"),
                 })
 
-            # Related topics
             for topic in data.get("RelatedTopics", [])[:max_results]:
                 if isinstance(topic, dict) and topic.get("Text"):
                     results.append({
@@ -66,159 +209,64 @@ def _search_duckduckgo(query: str, max_results: int = 5) -> List[Dict[str, str]]
                         "source": "DuckDuckGo",
                     })
 
-            # Infobox
-            if data.get("Infobox"):
-                for item in data.get("Infobox", {}).get("content", [])[:3]:
-                    if item.get("label") and item.get("value"):
-                        results.append({
-                            "title": item.get("label", ""),
-                            "url": "",
-                            "snippet": f"{item['label']}: {item['value']}",
-                            "source": data.get("Infobox", {}).get("meta", {}).get("src", ""),
-                        })
-
     except Exception as e:
-        logger.error(f"DuckDuckGo search error: {e}")
+        logger.error(f"DDG API search error: {e}")
 
     return results[:max_results]
 
 
-def _search_duckduckgo_html(query: str, max_results: int = 8) -> List[Dict[str, str]]:
-    """Search DuckDuckGo via HTML parsing for full web results.
+# ---------------------------------------------------------------------------
+# Wikipedia Search
+# ---------------------------------------------------------------------------
 
-    The Instant Answer API only returns direct answers, not general
-    web search results. This method parses the HTML search page to
-    get actual search result links and snippets.
-    """
+def _search_wikipedia(query: str, max_results: int = 5) -> List[Dict[str, str]]:
+    """Search Wikipedia (both zh and en) for results."""
     results = []
-    try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Mobile Safari/537.36",
-        }
-        data = {"q": query, "b": ""}
-        with httpx.Client(timeout=httpx.Timeout(15.0, connect=5.0), follow_redirects=True) as client:
-            resp = client.post(DDG_HTML, data=data, headers=headers)
-            if resp.status_code != 200:
-                logger.warning(f"DDG HTML returned {resp.status_code}")
-                return results
+    for lang in ("zh", "en"):
+        try:
+            params = {
+                "action": "query",
+                "list": "search",
+                "srsearch": query,
+                "srlimit": max_results,
+                "format": "json",
+                "utf8": 1,
+            }
+            url = f"https://{lang}.wikipedia.org/w/api.php"
+            with httpx.Client(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
+                resp = client.get(url, params=params)
+                if resp.status_code != 200:
+                    continue
 
-            html = resp.text
-
-            # Parse search results from HTML
-            # DDG HTML uses: <a rel="nofollow" class="result__a" href="...">Title</a>
-            # and: <a class="result__snippet" ...>Snippet</a>
-            # and: <span class="result__url__domain">domain</span>
-
-            import re as _re
-
-            # Find result blocks
-            result_pattern = _re.compile(
-                r'<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>(.*?)</a>'
-                r'.*?'
-                r'(?:<a[^>]*class="result__snippet"[^>]*>(.*?)</a>|<td[^>]*class="result__snippet[^"]*"[^>]*>(.*?)</td>)?',
-                _re.DOTALL,
-            )
-
-            for match in result_pattern.finditer(html):
-                url = match.group(1).strip()
-                title = _re.sub(r"<[^>]+>", "", match.group(2)).strip()
-                snippet = ""
-                if match.group(3):
-                    snippet = _re.sub(r"<[^>]+>", "", match.group(3)).strip()
-                elif match.group(4):
-                    snippet = _re.sub(r"<[^>]+>", "", match.group(4)).strip()
-
-                # Skip ad results
-                if "duckduckgo.com" in url and "uddg=" in url:
-                    # Extract actual URL from redirect
-                    uddg_match = _re.search(r"uddg=([^&]+)", url)
-                    if uddg_match:
-                        url = urllib.parse.unquote(uddg_match.group(1))
-
-                if title and url and "duckduckgo.com" not in url:
+                data = resp.json()
+                for item in data.get("query", {}).get("search", []):
+                    title = item.get("title", "")
+                    snippet = re.sub(r'<[^>]+>', '', item.get("snippet", ""))
+                    title_enc = urllib.parse.quote(title.replace(" ", "_"), safe="")
                     results.append({
-                        "title": title[:120],
-                        "url": url,
-                        "snippet": snippet[:300] if snippet else "",
-                        "source": "DuckDuckGo",
+                        "title": title,
+                        "url": f"https://{lang}.wikipedia.org/wiki/{title_enc}",
+                        "snippet": snippet[:300],
+                        "source": f"Wikipedia ({lang})",
                     })
 
-                if len(results) >= max_results:
-                    break
-
-    except Exception as e:
-        logger.error(f"DuckDuckGo HTML search error: {e}")
+        except Exception as e:
+            logger.error(f"Wikipedia {lang} search error: {e}")
 
     return results
 
 
-def _search_wikipedia(query: str) -> Optional[Dict[str, str]]:
-    """Search Wikipedia for a summary of the given topic."""
-    try:
-        # URL encode the query for Chinese characters
-        encoded = urllib.parse.quote(query, safe="")
-        url = f"{WIKI_API}{encoded}"
-        with httpx.Client(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
-            resp = client.get(url)
-            if resp.status_code != 200:
-                return None
-
-            data = resp.json()
-            return {
-                "title": data.get("title", query),
-                "url": data.get("content_urls", {}).get("desktop", {}).get("page", ""),
-                "snippet": data.get("extract", ""),
-                "source": "Wikipedia",
-            }
-    except Exception as e:
-        logger.error(f"Wikipedia search error: {e}")
-        return None
-
-
-def _search_wikipedia_search(query: str, max_results: int = 5) -> List[Dict[str, str]]:
-    """Search Wikipedia using the search API for multiple results."""
-    results = []
-    try:
-        params = {
-            "action": "query",
-            "list": "search",
-            "srsearch": query,
-            "srlimit": max_results,
-            "format": "json",
-            "utf8": 1,
-        }
-        with httpx.Client(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
-            resp = client.get(WIKI_SEARCH, params=params)
-            if resp.status_code != 200:
-                return results
-
-            data = resp.json()
-            for item in data.get("query", {}).get("search", []):
-                title = item.get("title", "")
-                snippet = item.get("snippet", "")
-                # Clean HTML from snippet
-                snippet = re.sub(r"<[^>]+>", "", snippet)
-                # Get URL
-                title_encoded = urllib.parse.quote(title.replace(" ", "_"), safe="")
-                results.append({
-                    "title": title,
-                    "url": f"https://zh.wikipedia.org/wiki/{title_encoded}",
-                    "snippet": snippet[:300],
-                    "source": "Wikipedia",
-                })
-    except Exception as e:
-        logger.error(f"Wikipedia search API error: {e}")
-
-    return results
-
+# ---------------------------------------------------------------------------
+# URL Fetch
+# ---------------------------------------------------------------------------
 
 def _fetch_url(url: str, max_chars: int = 5000) -> str:
     """Fetch and extract text content from a URL."""
     try:
         with httpx.Client(
-            timeout=httpx.Timeout(15.0, connect=5.0),
+            timeout=httpx.Timeout(15.0, connect=8.0),
             follow_redirects=True,
-            headers={"User-Agent": "Mozilla/5.0 (Android) HermesAgent/1.0"},
+            headers=HEADERS,
         ) as client:
             resp = client.get(url)
             if resp.status_code != 200:
@@ -230,17 +278,14 @@ def _fetch_url(url: str, max_chars: int = 5000) -> str:
 
             text = resp.text
 
-            # Basic HTML stripping for HTML content
             if "text/html" in content_type:
-                # Remove script and style tags and their contents
                 text = re.sub(r"<script[^>]*>.*?</script>", "", text, flags=re.DOTALL | re.IGNORECASE)
                 text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL | re.IGNORECASE)
-                # Remove HTML tags
+                text = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
                 text = re.sub(r"<[^>]+>", " ", text)
-                # Clean up whitespace
                 text = re.sub(r"\s+", " ", text).strip()
-                # Decode HTML entities
-                text = text.replace("&nbsp;", " ").replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+                text = text.replace("&nbsp;", " ").replace("&amp;", "&")
+                text = text.replace("&lt;", "<").replace("&gt;", ">")
                 text = text.replace("&quot;", '"').replace("&#39;", "'")
 
             if len(text) > max_chars:
@@ -266,51 +311,65 @@ def web_search(query: str, max_results: int = 5) -> str:
     if not query.strip():
         return tool_error("Search query is required")
 
-    all_results = []
+    all_results: List[Dict[str, str]] = []
+    seen_urls: set = set()
 
-    # Primary: DuckDuckGo HTML search (full web results)
-    ddg_html_results = _search_duckduckgo_html(query, max_results)
-    all_results.extend(ddg_html_results)
-
-    # Fallback: DuckDuckGo Instant Answer API (direct answers)
-    if len(all_results) < max_results:
-        ddg_results = _search_duckduckgo(query, max_results - len(all_results))
-        # Deduplicate
-        existing_urls = {r.get("url", "") for r in all_results}
-        for r in ddg_results:
-            if r.get("url", "") not in existing_urls:
+    def add_results(new_results: List[Dict[str, str]]) -> None:
+        for r in new_results:
+            url = r.get("url", "")
+            if url and url not in seen_urls:
                 all_results.append(r)
-                existing_urls.add(r.get("url", ""))
+                seen_urls.add(url)
 
-    # Supplementary: Wikipedia search API (multiple results)
+    # Tier 1: Bing (most reliable, full web results)
+    try:
+        bing_results = _search_bing(query, max_results)
+        add_results(bing_results)
+        logger.info(f"Bing: {len(bing_results)} results")
+    except Exception as e:
+        logger.error(f"Bing error: {e}")
+
+    # Tier 2: DDG Lite (backup web results)
     if len(all_results) < max_results:
-        wiki_results = _search_wikipedia_search(query, max_results - len(all_results))
-        existing_urls = {r.get("url", "") for r in all_results}
-        for r in wiki_results:
-            if r.get("url", "") not in existing_urls:
-                all_results.append(r)
-                existing_urls.add(r.get("url", ""))
+        try:
+            ddg_results = _search_ddg_lite(query, max_results)
+            add_results(ddg_results)
+            logger.info(f"DDG Lite: {len(ddg_results)} results")
+        except Exception as e:
+            logger.error(f"DDG Lite error: {e}")
 
-    # Supplementary: Wikipedia summary (single best match)
-    if len(all_results) < 2:
-        wiki_result = _search_wikipedia(query)
-        if wiki_result and wiki_result.get("snippet"):
-            existing_urls = {r.get("url", "") for r in all_results}
-            if wiki_result.get("url", "") not in existing_urls:
-                all_results.append(wiki_result)
+    # Tier 3: DDG Instant Answer (encyclopedia-style answers)
+    if len(all_results) < max_results:
+        try:
+            ddg_api_results = _search_ddg_api(query, max_results)
+            add_results(ddg_api_results)
+            logger.info(f"DDG API: {len(ddg_api_results)} results")
+        except Exception as e:
+            logger.error(f"DDG API error: {e}")
 
-    if not all_results:
+    # Tier 4: Wikipedia (both zh and en)
+    if len(all_results) < max_results:
+        try:
+            wiki_results = _search_wikipedia(query, max_results)
+            add_results(wiki_results)
+            logger.info(f"Wikipedia: {len(wiki_results)} results")
+        except Exception as e:
+            logger.error(f"Wikipedia error: {e}")
+
+    final = all_results[:max_results]
+
+    if not final:
         return tool_result({
             "query": query,
             "results": [],
             "count": 0,
-            "message": "未找到相关结果，请尝试不同的搜索词",
+            "message": "未找到相关结果，请尝试不同的搜索词或用英文搜索",
         })
 
     return tool_result({
         "query": query,
-        "results": all_results[:max_results],
-        "count": len(all_results[:max_results]),
+        "results": final,
+        "count": len(final),
     })
 
 
@@ -324,7 +383,6 @@ def web_fetch(url: str, max_chars: int = 5000) -> str:
     if not url.strip():
         return tool_error("URL is required")
 
-    # Basic URL validation
     if not url.startswith(("http://", "https://")):
         return tool_error("URL must start with http:// or https://")
 
@@ -348,7 +406,7 @@ registry.register(
         "type": "function",
         "function": {
             "name": "web_search",
-            "description": "Search the web for information using DuckDuckGo and Wikipedia. Returns relevant results with titles, URLs, and snippets.",
+            "description": "Search the web for information using Bing, DuckDuckGo and Wikipedia. Returns results with titles, URLs, and snippets.",
             "parameters": {
                 "type": "object",
                 "properties": {
