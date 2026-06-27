@@ -91,6 +91,47 @@ def _is_junk_title(title: str) -> bool:
     return False
 
 
+def _resolve_baidu_url(url: str) -> str:
+    """Resolve Baidu redirect URLs to real URLs.
+
+    Baidu uses URLs like:
+    - http://www.baidu.com/link?url=XXXXX
+    - https://m.baidu.com/from=844b/s?word=...&url=XXXXX
+
+    We try to extract the real URL, or follow the redirect.
+    """
+    if 'baidu.com/link' not in url and 'baidu.com/from' not in url:
+        return url
+
+    # Try to extract URL from query params
+    parsed = urllib.parse.urlparse(url)
+    params = urllib.parse.parse_qs(parsed.query)
+
+    # Some Baidu URLs have the real URL in 'url' param
+    if 'url' in params:
+        return params['url'][0]
+
+    # Some have it in 'wd' or 'eqid' params (less common)
+    # Otherwise, follow the redirect to get the real URL
+    try:
+        with httpx.Client(
+            timeout=httpx.Timeout(5.0, connect=3.0),
+            follow_redirects=False,
+            headers=HEADERS_MOBILE,
+        ) as client:
+            resp = client.get(url)
+            # Baidu redirect returns 302 with Location header
+            if resp.status_code in (301, 302, 303, 307):
+                location = resp.headers.get('location', '')
+                if location and not any(d in location for d in ['baidu.com']):
+                    return location
+    except Exception:
+        pass
+
+    # If we can't resolve, return the original URL
+    return url
+
+
 # ---------------------------------------------------------------------------
 # Baidu Mobile Search (primary - simpler HTML)
 # ---------------------------------------------------------------------------
@@ -159,9 +200,10 @@ def _search_baidu_mobile(query: str, max_results: int = 8) -> List[Dict[str, str
                         snippet = ""
 
                 seen.add(link)
+                real_url = _resolve_baidu_url(link)
                 results.append({
                     "title": title[:150],
-                    "url": link,
+                    "url": real_url,
                     "snippet": snippet,
                     "source": "百度",
                 })
@@ -184,9 +226,10 @@ def _search_baidu_mobile(query: str, max_results: int = 8) -> List[Dict[str, str
                         continue
 
                     seen.add(link)
+                    real_url = _resolve_baidu_url(link)
                     results.append({
                         "title": title[:150],
-                        "url": link,
+                        "url": real_url,
                         "snippet": "",
                         "source": "百度",
                     })
@@ -242,9 +285,10 @@ def _search_baidu_desktop(query: str, max_results: int = 8) -> List[Dict[str, st
                     continue
 
                 seen.add(link)
+                real_url = _resolve_baidu_url(link)
                 results.append({
                     "title": title[:150],
-                    "url": link,
+                    "url": real_url,
                     "snippet": "",
                     "source": "百度",
                 })
