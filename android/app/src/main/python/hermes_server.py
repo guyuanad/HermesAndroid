@@ -188,7 +188,7 @@ async def _call_llm_with_tools(
     tools: List[dict] = None,
     max_turns: int = MAX_TOOL_TURNS,
 ) -> Any:
-    """Call LLM with tool support. Returns (full_text, tool_calls_log)."""
+    """Call LLM with tool support. Returns (full_text, tool_calls_log, error)."""
 
     url = f"{base_url.rstrip('/')}/chat/completions"
     headers = {
@@ -201,6 +201,7 @@ async def _call_llm_with_tools(
     tool_calls_log = []
     current_messages = list(messages)
     full_text = ""
+    tools_schema = tools  # Keep original for re-sending
 
     for turn in range(max_turns + 1):
         payload: dict = {
@@ -208,8 +209,11 @@ async def _call_llm_with_tools(
             "messages": current_messages,
             "stream": False,
         }
-        if tools and turn == 0:
-            payload["tools"] = tools
+
+        # Send tools schema on first turn; after tool results, don't send tools
+        # so the LLM generates a text response instead of more tool calls
+        if tools_schema and turn == 0:
+            payload["tools"] = tools_schema
             payload["tool_choice"] = "auto"
 
         try:
@@ -230,7 +234,7 @@ async def _call_llm_with_tools(
                 finish_reason = choice.get("finish_reason", "")
 
                 # Collect text content
-                content = message.get("content", "")
+                content = message.get("content") or ""
                 if content:
                     full_text += content
 
@@ -270,7 +274,7 @@ async def _call_llm_with_tools(
                     tool_calls_log.append({
                         "name": tool_name,
                         "arguments": tool_args,
-                        "result_preview": tool_result_str[:200],
+                        "result_preview": tool_result_str[:300],
                     })
 
                     # Add tool result to messages
@@ -280,14 +284,80 @@ async def _call_llm_with_tools(
                         "content": tool_result_str,
                     })
 
-                # Don't send tools schema on subsequent turns (simplify)
-                tools = None
-
         except httpx.ConnectError as e:
             return full_text, tool_calls_log, f"Connection error: {e}"
         except Exception as e:
             logger.error(f"LLM call failed: {e}", exc_info=True)
             return full_text, tool_calls_log, str(e)
+
+    # ---- Post-processing: ensure there's always a text response ----
+    # If the LLM didn't generate text after tool calls, we need to ask it again
+    # or generate a summary from tool results ourselves.
+    if not full_text and tool_calls_log:
+        logger.info("LLM returned no text after tool calls, requesting summary...")
+
+        # Try one more LLM call asking for a summary
+        summary_prompt = {
+            "role": "user",
+            "content": "请根据上面的工具调用结果，用中文给用户一个简洁有用的回复。不要提及工具或技术细节，直接回答用户的问题。"
+        }
+        current_messages.append(summary_prompt)
+
+        payload = {
+            "model": model,
+            "messages": current_messages,
+            "stream": False,
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=15.0)) as client:
+                response = await client.post(url, json=payload, headers=headers)
+                if response.status_code == 200:
+                    data = response.json()
+                    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    if content:
+                        full_text = content
+                        logger.info(f"Summary generated: {len(full_text)} chars")
+        except Exception as e:
+            logger.error(f"Summary call failed: {e}")
+
+        # Final fallback: generate summary from tool results directly
+        if not full_text:
+            parts = []
+            for tc in tool_calls_log:
+                name = tc["name"]
+                result = tc.get("result_preview", "")
+                # Try to parse the result for readable content
+                try:
+                    parsed = json.loads(result)
+                    if isinstance(parsed, dict):
+                        # web_search results
+                        if "result" in parsed:
+                            r = parsed["result"]
+                            if isinstance(r, dict) and "results" in r:
+                                for item in r["results"][:5]:
+                                    title = item.get("title", "")
+                                    snippet = item.get("snippet", "")
+                                    url = item.get("url", "")
+                                    if title:
+                                        entry = f"- {title}"
+                                        if snippet:
+                                            entry += f"：{snippet[:100]}"
+                                        parts.append(entry)
+                            elif isinstance(r, dict) and "error" in r:
+                                parts.append(f"错误: {r['error']}")
+                            else:
+                                parts.append(str(r)[:200])
+                        elif "error" in parsed:
+                            parts.append(f"工具 {name} 错误: {parsed['error']}")
+                        else:
+                            parts.append(str(parsed)[:200])
+                except (json.JSONDecodeError, TypeError):
+                    if result:
+                        parts.append(result[:150])
+
+            if parts:
+                full_text = "根据搜索结果：\n\n" + "\n".join(parts)
 
     return full_text, tool_calls_log, None
 
