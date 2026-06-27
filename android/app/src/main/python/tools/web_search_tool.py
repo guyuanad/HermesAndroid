@@ -38,22 +38,25 @@ HEADERS_DESKTOP = {
 _search_diagnostics: List[str] = []
 
 # Domains that are NOT real search results (navigation, login, ads, etc.)
+# NOTE: baidu.com is NOT here because Baidu redirect URLs (baidu.com/link?url=...)
+# are real search results that need to be resolved, not filtered out.
 JUNK_DOMAINS = {
-    'baidu.com', 'bing.com', 'google.com', 'microsoft.com',
-    'qq.com', 'weixin.qq.com', 'wx.qq.com', 'taobao.com',
-    'jd.com', 'tmall.com', 'alipay.com', 'alibaba.com',
-    'douyin.com', 'tiktok.com', 'weibo.com', 'zhihu.com',
-    'apple.com', 'play.google.com', 'github.com',
+    'google.com', 'microsoft.com',
     'login.', 'passport.', 'account.', 'auth.',
-    'ad.', 'ads.', 'adv.', 'click.', 'track.',
-    'm.baidu.com', 'wap.baidu.com',
+    'ad.', 'ads.', 'adv.', 'track.',
+}
+
+# Baidu-internal paths that are NOT search results (but baidu.com/link IS a result)
+BAIDU_JUNK_PATHS = {
+    '/s?', '/home', '/gaoji', '/more/', '/hao/',
+    '/bdzk/', '/ulink?', '/passport', '/v?',
 }
 
 # Title patterns that indicate junk links
 JUNK_TITLE_PATTERNS = [
     r'^登录', r'^注册', r'^下载', r'^安装', r'^APP',
-    r'^客户端', r'^首页$', r'^首页$', r'^更多',
-    r'^百度', r'^搜索', r'^换一换',
+    r'^客户端', r'^首页$', r'^更多', r'^换一换',
+    r'^百度一下', r'^百度首页', r'^使用百度前必读',
 ]
 
 
@@ -69,13 +72,42 @@ def _clean_html(text: str) -> str:
 
 
 def _is_junk_url(url: str) -> bool:
-    """Check if a URL is a junk/navigation link."""
+    """Check if a URL is a junk/navigation link.
+
+    IMPORTANT: Baidu redirect URLs (baidu.com/link?url=...) are NOT junk -
+    they are real search results that need to be resolved.
+    Only filter Baidu internal navigation pages.
+    """
     try:
         parsed = urllib.parse.urlparse(url)
         host = parsed.hostname or ""
+        path = parsed.path or ""
+
+        # Check general junk domains
         for d in JUNK_DOMAINS:
             if host == d or host.endswith('.' + d):
                 return True
+
+        # Special handling for Baidu:
+        # baidu.com/link is a search result redirect (NOT junk)
+        # baidu.com/s?, baidu.com/home etc. are internal pages (junk)
+        if 'baidu.com' in host:
+            if '/link' in path or '/from' in path:
+                return False  # These are search result redirects!
+            for junk_path in BAIDU_JUNK_PATHS:
+                if path.startswith(junk_path):
+                    return True
+            # Other baidu.com paths that aren't redirects are probably internal
+            if path and path != '/':
+                return True
+
+        # Similarly for Bing
+        if 'bing.com' in host:
+            if '/search' in path or '/cr?' in path:
+                return False  # Search pages/redirects
+            if path and path != '/':
+                return True
+
     except Exception:
         pass
     return False
