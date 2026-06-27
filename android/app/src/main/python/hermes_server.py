@@ -54,6 +54,110 @@ DEFAULT_BASE_URL = "https://apihub.agnes-ai.com/v1"
 DEFAULT_MODEL = "agnes-2.0-flash"
 MAX_TOOL_TURNS = 10
 
+
+# ---------------------------------------------------------------------------
+# Format tool results as readable text (when LLM fails to summarize)
+# ---------------------------------------------------------------------------
+
+def _format_tool_results_readable(tool_calls_log: list) -> str:
+    """Convert tool call results into human-readable text.
+
+    Called when the LLM fails to generate a text summary after tool calls.
+    """
+    parts = []
+
+    for tc in tool_calls_log:
+        name = tc.get("name", "")
+        result_str = tc.get("result_preview", "")
+
+        try:
+            parsed = json.loads(result_str)
+        except (json.JSONDecodeError, TypeError):
+            parsed = None
+
+        if not isinstance(parsed, dict):
+            parts.append(f"[{name}] {result_str[:200]}")
+            continue
+
+        # Handle specific tool types
+        if name == "current_time":
+            r = parsed.get("result", parsed)
+            date = r.get("date", "")
+            time = r.get("time", "")
+            weekday = r.get("weekday", "")
+            parts.append(f"现在是 {date} {weekday} {time}")
+
+        elif name == "web_search":
+            r = parsed.get("result", parsed)
+            results = r.get("results", [])
+            if results:
+                for item in results[:5]:
+                    title = item.get("title", "")
+                    snippet = item.get("snippet", "")
+                    url = item.get("url", "")
+                    entry = f"- {title}"
+                    if snippet:
+                        entry += f"\n  {snippet[:100]}"
+                    parts.append(entry)
+            else:
+                msg = r.get("message", "未找到结果")
+                parts.append(f"搜索结果：{msg}")
+
+        elif name in ("memory_add", "memory_replace", "memory_remove"):
+            r = parsed.get("result", parsed)
+            if "error" in parsed:
+                parts.append(f"记忆操作失败：{parsed['error']}")
+            else:
+                parts.append(f"记忆已更新：{json.dumps(r, ensure_ascii=False)[:100]}")
+
+        elif name in ("todo_write", "todo_read"):
+            r = parsed.get("result", parsed)
+            if isinstance(r, list):
+                for item in r[:10]:
+                    content = item.get("content", str(item))
+                    status = item.get("status", "")
+                    icon = {"pending": "○", "in_progress": "◐", "completed": "●"}.get(status, "○")
+                    parts.append(f"{icon} {content}")
+            elif isinstance(r, dict):
+                parts.append(f"任务已更新：{json.dumps(r, ensure_ascii=False)[:100]}")
+
+        elif name in ("skills_list", "skill_view"):
+            r = parsed.get("result", parsed)
+            skills = r.get("skills", r.get("result", []))
+            if isinstance(skills, list):
+                for s in skills[:5]:
+                    if isinstance(s, dict):
+                        parts.append(f"- {s.get('name', str(s))}: {s.get('description', '')[:80]}")
+                    else:
+                        parts.append(f"- {s}")
+
+        elif name == "cronjob":
+            r = parsed.get("result", parsed)
+            parts.append(f"定时任务：{json.dumps(r, ensure_ascii=False)[:200]}")
+
+        elif name == "list_files":
+            r = parsed.get("result", parsed)
+            entries = r.get("entries", [])
+            for e in entries[:10]:
+                etype = "📁" if e.get("type") == "directory" else "📄"
+                parts.append(f"{etype} {e.get('name', '')} ({e.get('size', 0)} bytes)")
+
+        elif name == "read_file":
+            r = parsed.get("result", parsed)
+            content = r.get("content", "")
+            parts.append(content[:500] if content else "文件为空")
+
+        else:
+            # Generic fallback
+            r = parsed.get("result", parsed)
+            if "error" in parsed:
+                parts.append(f"错误：{parsed['error']}")
+            else:
+                text = json.dumps(r, ensure_ascii=False)[:200]
+                parts.append(f"[{name}] {text}")
+
+    return "\n\n".join(parts)
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -589,14 +693,12 @@ def create_app() -> FastAPI:
         if error and not full_text:
             full_text = error
 
-        # Format response with tool call info
+        # Format response - only show the AI's text, NOT raw tool JSON
         response_text = full_text
-        if tool_calls_log:
-            tool_summary = "\n\n".join(
-                f"🔧 {tc['name']}: {tc['result_preview']}"
-                for tc in tool_calls_log
-            )
-            response_text = full_text + "\n\n---\n**工具调用记录:**\n" + tool_summary
+
+        # If the AI didn't generate text after tool calls, create a readable summary
+        if not response_text and tool_calls_log:
+            response_text = _format_tool_results_readable(tool_calls_log)
 
         # Save assistant message
         session["messages"].append({

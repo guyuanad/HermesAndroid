@@ -437,14 +437,21 @@ function ChatScreen({
         </View>
         {item.tool_calls && item.tool_calls.length > 0 && (
           <View style={s.toolCallsContainer}>
-            {item.tool_calls.map((tc: ToolCall, idx: number) => (
-              <View key={idx} style={s.toolCallChip}>
-                <Text style={s.toolCallName}>🔧 {tc.name}</Text>
-                <Text style={s.toolCallResult} numberOfLines={2}>
-                  {tc.result_preview}
-                </Text>
-              </View>
-            ))}
+            {item.tool_calls.map((tc: ToolCall, idx: number) => {
+              const emoji: Record<string,string> = {
+                current_time: '🕐', web_search: '🔍', web_fetch: '🌐',
+                memory_add: '🧠', memory_replace: '🧠', memory_remove: '🧠',
+                todo_write: '📋', todo_read: '📋',
+                skills_list: '🎯', skill_view: '🎯', skill_manage: '🎯',
+                cronjob: '⏰', read_file: '📄', write_file: '📝', list_files: '📂',
+              };
+              return (
+                <View key={idx} style={s.toolCallChip}>
+                  <Text style={s.toolCallName}>{emoji[tc.name] || '🔧'} {tc.name}</Text>
+                  <Text style={s.toolCallStatus}>已完成</Text>
+                </View>
+              );
+            })}
           </View>
         )}
       </View>
@@ -1402,7 +1409,7 @@ const s = StyleSheet.create({
     maxWidth: '80%',
   },
   toolCallName: { fontSize: 11, fontWeight: '600', color: '#2E7D32' },
-  toolCallResult: { fontSize: 10, color: '#388E3C', marginTop: 2 },
+  toolCallStatus: { fontSize: 10, color: '#66BB6A', marginTop: 1 },
 
   // Input
   inputBar: {
