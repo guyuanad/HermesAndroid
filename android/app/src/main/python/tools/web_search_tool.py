@@ -1,9 +1,7 @@
 """Web Search Tool for Hermes Android.
 
-Uses a link-extraction approach instead of CSS class matching.
-This is robust against HTML structure changes.
-
-No API key required.
+Uses link-extraction approach that doesn't depend on CSS classes.
+Desktop Baidu as primary (server-rendered, not JS-based like mobile).
 """
 
 from __future__ import annotations
@@ -20,16 +18,11 @@ from tools.registry import registry, tool_error, tool_result
 
 logger = logging.getLogger("hermes.tools.web_search")
 
-HEADERS_MOBILE = {
-    "User-Agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.6422.113 Mobile Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-}
-
 HEADERS_DESKTOP = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    "Accept-Encoding": "gzip, deflate",
 }
 
 _search_diagnostics: List[str] = []
@@ -41,99 +34,25 @@ def _clean_html(text: str) -> str:
     text = text.replace('&nbsp;', ' ').replace('&amp;', '&')
     text = text.replace('&lt;', '<').replace('&gt;', '>')
     text = text.replace('&quot;', '"').replace('&#39;', "'")
-    text = text.replace('&#34;', '"').replace('&#x27;', "'")
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
 
-def _is_navigation_link(title: str, url: str) -> bool:
-    """Determine if a link is navigation/chrome rather than a search result.
-
-    Uses heuristics based on title length, content, and URL patterns.
-    Works regardless of HTML structure changes.
-    """
-    # Short titles are almost always navigation
-    if len(title) < 8:
-        return True
-
-    # Common navigation keywords
-    nav_keywords = [
-        '登录', '注册', '下载', '安装', '客户端', '首页', '更多',
-        '换一换', '下一页', '上一页', '百度一下', '百度首页',
-        '使用百度', '意见反馈', '举报', '加入VIP', '购买',
-        '相关搜索', '大家还在搜', '为您推荐',
-    ]
-    for kw in nav_keywords:
-        if title.startswith(kw) or title == kw:
-            return True
-
-    # URLs that are definitely internal navigation
-    parsed = urllib.parse.urlparse(url)
-    host = parsed.hostname or ""
-    path = parsed.path or ""
-
-    # Baidu internal pages (NOT baidu.com/link which is a result redirect)
-    if 'baidu.com' in host:
-        if '/link' in path or '/from' in path:
-            return False  # These ARE search results
-        if path in ('/', '') and 'baidu.com' in host:
-            return True  # Homepage
-        if any(p in path for p in ['/s?', '/home', '/gaoji', '/hao/', '/passport', '/v?']):
-            return True
-
-    return False
-
-
-def _extract_all_links(html: str) -> List[Dict[str, str]]:
-    """Extract ALL <a> tags from HTML with their href and text.
-
-    This is the fundamental building block - it doesn't depend on
-    any specific HTML structure or CSS classes.
-    """
-    links = []
-    # Match <a> tags with href attribute
-    pattern = re.compile(
-        r'<a[^>]*href=["\']([^"\']*)["\'][^>]*>(.*?)</a>',
-        re.DOTALL,
-    )
-
-    for match in pattern.finditer(html):
-        url = match.group(1).strip()
-        title = _clean_html(match.group(2))
-
-        if not url or not title:
-            continue
-
-        # Skip anchor links, javascript, and relative paths without domain
-        if url.startswith('#') or url.startswith('javascript:') or url.startswith('mailto:'):
-            continue
-
-        # Make relative URLs absolute (we'll skip these anyway, but just in case)
-        if not url.startswith(('http://', 'https://')):
-            continue
-
-        links.append({"url": url, "title": title})
-
-    return links
-
-
 def _resolve_baidu_url(url: str, client: httpx.Client = None) -> str:
     """Resolve Baidu redirect URLs to real URLs."""
-    if 'baidu.com/link' not in url and 'baidu.com/from' not in url:
+    if 'baidu.com/link' not in url:
         return url
 
-    # Try to extract URL from query params first (faster)
     parsed = urllib.parse.urlparse(url)
     params = urllib.parse.parse_qs(parsed.query)
     if 'url' in params:
         return params['url'][0]
 
-    # Follow redirect
     try:
         c = client or httpx.Client(
             timeout=httpx.Timeout(5.0, connect=3.0),
             follow_redirects=False,
-            headers=HEADERS_MOBILE,
+            headers=HEADERS_DESKTOP,
         )
         resp = c.get(url)
         if resp.status_code in (301, 302, 303, 307):
@@ -146,131 +65,48 @@ def _resolve_baidu_url(url: str, client: httpx.Client = None) -> str:
     return url
 
 
-def _smart_filter_links(
-    links: List[Dict[str, str]],
-    max_results: int = 8,
-    prefer_domains: List[str] = None,
-) -> List[Dict[str, str]]:
-    """Smart filter: separate search results from navigation links.
+def _is_navigation_title(title: str) -> bool:
+    """Check if a title is navigation text, not a search result.
 
-    Strategy:
-    1. Filter out obvious navigation links
-    2. Deduplicate by URL
-    3. Score links by likelihood of being a result
-    4. Return top results
+    Key insight: Chinese characters are information-dense.
+    A 3-char Chinese title is meaningful (like "午间新闻").
+    Only filter very short or obvious navigation text.
     """
-    seen_urls = set()
-    results = []
+    if not title:
+        return True
 
-    for link in links:
-        title = link["title"]
-        url = link["url"]
+    # Filter purely symbolic/numeric titles (less than 3 meaningful chars)
+    chinese_chars = len(re.findall(r'[\u4e00-\u9fff]', title))
+    total_meaningful = chinese_chars + len(re.findall(r'[a-zA-Z0-9]', title))
+    if total_meaningful < 2:
+        return True
 
-        # Skip navigation
-        if _is_navigation_link(title, url):
-            continue
+    # Obvious navigation keywords
+    nav_patterns = [
+        r'^登录$', r'^注册$', r'^下载$', r'^安装$', r'^客户端$',
+        r'^首页$', r'^更多$', r'^换一换$', r'^下一页$', r'^上一页$',
+        r'^百度一下$', r'^百度首页$', r'^使用百度前必读$',
+        r'^意见反馈$', r'^举报$', r'^相关搜索$',
+    ]
+    for p in nav_patterns:
+        if re.match(p, title):
+            return True
 
-        # Deduplicate
-        if url in seen_urls:
-            continue
-        seen_urls.add(url)
-
-        # Score this link (higher = more likely a result)
-        score = 0
-
-        # Longer titles are more likely results
-        score += min(len(title), 50)
-
-        # Baidu redirect URLs are almost always results
-        if 'baidu.com/link' in url or 'baidu.com/from' in url:
-            score += 100
-
-        # External domains are more likely results than search engine domains
-        host = urllib.parse.urlparse(url).hostname or ""
-        if not any(d in host for d in ['baidu.com', 'bing.com', 'google.com']):
-            score += 50
-
-        # Prefer news/content sites if specified
-        if prefer_domains:
-            for d in prefer_domains:
-                if d in host:
-                    score += 30
-
-        # Title contains Chinese characters (likely content)
-        if re.search(r'[\u4e00-\u9fff]', title):
-            score += 10
-
-        results.append({
-            "title": title[:150],
-            "url": url,
-            "score": score,
-        })
-
-    # Sort by score descending
-    results.sort(key=lambda x: x["score"], reverse=True)
-
-    # Return top results, remove score
-    return [{"title": r["title"], "url": r["url"]} for r in results[:max_results]]
+    return False
 
 
 # ---------------------------------------------------------------------------
-# Baidu Mobile Search
+# Baidu Desktop Search (PRIMARY - server-rendered HTML)
 # ---------------------------------------------------------------------------
 
 def _search_baidu(query: str, max_results: int = 8) -> List[Dict[str, str]]:
-    """Search Baidu Mobile using link extraction approach."""
+    """Search Baidu Desktop.
+
+    Desktop version uses server-side rendering, so search results
+    are in the initial HTML (unlike mobile which may use JS).
+    """
     results = []
-    _search_diagnostics.append(f"BaiduMobile: query='{query}'")
-    try:
-        url = "https://m.baidu.com/s"
-        params = {"word": query, "rn": "20"}
-        with httpx.Client(
-            timeout=httpx.Timeout(15.0, connect=8.0),
-            follow_redirects=True,
-            headers=HEADERS_MOBILE,
-        ) as client:
-            resp = client.get(url, params=params)
-            _search_diagnostics.append(f"BaiduMobile: HTTP {resp.status_code}, {len(resp.text)} chars")
-
-            if resp.status_code != 200:
-                return results
-
-            html = resp.text
-
-            # Step 1: Extract ALL links
-            all_links = _extract_all_links(html)
-            _search_diagnostics.append(f"BaiduMobile: extracted {len(all_links)} raw links")
-
-            # Step 2: Smart filter
-            filtered = _smart_filter_links(all_links, max_results * 3)
-
-            # Step 3: Resolve Baidu redirect URLs
-            for link in filtered[:max_results]:
-                real_url = _resolve_baidu_url(link["url"], client)
-                results.append({
-                    "title": link["title"],
-                    "url": real_url,
-                    "snippet": "",
-                    "source": "百度",
-                })
-
-            _search_diagnostics.append(f"BaiduMobile: found {len(results)} results")
-
-    except Exception as e:
-        _search_diagnostics.append(f"BaiduMobile: error - {e}")
-        logger.error(f"Baidu mobile search error: {e}")
-
-    return results
-
-
-# ---------------------------------------------------------------------------
-# Baidu Desktop Search (backup)
-# ---------------------------------------------------------------------------
-
-def _search_baidu_desktop(query: str, max_results: int = 8) -> List[Dict[str, str]]:
-    """Search Baidu Desktop using link extraction approach."""
-    results = []
-    _search_diagnostics.append("BaiduDesktop: starting")
+    _search_diagnostics.append(f"Baidu: query='{query}'")
     try:
         url = "https://www.baidu.com/s"
         params = {"wd": query, "rn": "20", "ie": "utf-8"}
@@ -280,62 +116,107 @@ def _search_baidu_desktop(query: str, max_results: int = 8) -> List[Dict[str, st
             headers=HEADERS_DESKTOP,
         ) as client:
             resp = client.get(url, params=params)
-            _search_diagnostics.append(f"BaiduDesktop: HTTP {resp.status_code}, {len(resp.text)} chars")
+            html = resp.text
+            _search_diagnostics.append(f"Baidu: HTTP {resp.status_code}, {len(html)} chars")
 
             if resp.status_code != 200:
                 return results
 
-            html = resp.text
+            seen = set()
 
-            # Desktop Baidu: prioritize <h3> links (these are definitely result titles)
-            h3_links = []
+            # ---- Strategy 1: <h3> links (highest confidence) ----
+            # Baidu ALWAYS puts result titles in <h3> tags
             h3_pattern = re.compile(
                 r'<h3[^>]*>\s*<a[^>]*href="([^"]*)"[^>]*>(.*?)</a>',
                 re.DOTALL,
             )
+            h3_count = 0
             for match in h3_pattern.finditer(html):
                 link = match.group(1).strip()
                 title = _clean_html(match.group(2))
-                if title and link:
-                    h3_links.append({"url": link, "title": title})
+                h3_count += 1
 
-            _search_diagnostics.append(f"BaiduDesktop: {len(h3_links)} h3 links found")
+                if _is_navigation_title(title) or link in seen:
+                    continue
 
-            if h3_links:
-                # h3 links are high-confidence results
-                seen = set()
-                for link in h3_links:
-                    if link["url"] in seen or _is_navigation_link(link["title"], link["url"]):
+                seen.add(link)
+                real_url = _resolve_baidu_url(link, client)
+                results.append({
+                    "title": title[:150],
+                    "url": real_url,
+                    "snippet": "",
+                    "source": "百度",
+                })
+
+                if len(results) >= max_results:
+                    break
+
+            _search_diagnostics.append(f"Baidu: h3 matches={h3_count}, results={len(results)}")
+
+            # ---- Strategy 2: All <a> links with href containing baidu.com/link ----
+            if len(results) < max_results:
+                link_pattern = re.compile(
+                    r'<a[^>]*href="(https?://[^"]*baidu\.com/link[^"]*)"[^>]*>(.*?)</a>',
+                    re.DOTALL,
+                )
+                link_count = 0
+                for match in link_pattern.finditer(html):
+                    link = match.group(1).strip()
+                    title = _clean_html(match.group(2))
+                    link_count += 1
+
+                    if _is_navigation_title(title) or link in seen:
                         continue
-                    seen.add(link["url"])
-                    real_url = _resolve_baidu_url(link["url"], client)
+
+                    seen.add(link)
+                    real_url = _resolve_baidu_url(link, client)
                     results.append({
-                        "title": link["title"][:150],
+                        "title": title[:150],
                         "url": real_url,
                         "snippet": "",
                         "source": "百度",
                     })
+
                     if len(results) >= max_results:
                         break
-            else:
-                # Fallback: extract all links and filter
-                all_links = _extract_all_links(html)
-                _search_diagnostics.append(f"BaiduDesktop: {len(all_links)} raw links")
-                filtered = _smart_filter_links(all_links, max_results)
-                for link in filtered:
-                    real_url = _resolve_baidu_url(link["url"], client)
+
+                _search_diagnostics.append(f"Baidu: baidu/link matches={link_count}, total={len(results)}")
+
+            # ---- Strategy 3: ALL external links (broadest fallback) ----
+            if len(results) < 3:
+                all_link_pattern = re.compile(
+                    r'<a[^>]*href="(https?://[^"]*)"[^>]*>(.*?)</a>',
+                    re.DOTALL,
+                )
+                all_count = 0
+                for match in all_link_pattern.finditer(html):
+                    link = match.group(1).strip()
+                    title = _clean_html(match.group(2))
+                    all_count += 1
+
+                    # Skip Baidu internal (but NOT /link redirects)
+                    if 'baidu.com' in link and '/link' not in link:
+                        continue
+
+                    if _is_navigation_title(title) or link in seen:
+                        continue
+
+                    seen.add(link)
                     results.append({
-                        "title": link["title"],
-                        "url": real_url,
+                        "title": title[:150],
+                        "url": link,
                         "snippet": "",
                         "source": "百度",
                     })
 
-            _search_diagnostics.append(f"BaiduDesktop: found {len(results)} results")
+                    if len(results) >= max_results:
+                        break
+
+                _search_diagnostics.append(f"Baidu: all links scanned={all_count}, total={len(results)}")
 
     except Exception as e:
-        _search_diagnostics.append(f"BaiduDesktop: error - {e}")
-        logger.error(f"Baidu desktop search error: {e}")
+        _search_diagnostics.append(f"Baidu: error - {e}")
+        logger.error(f"Baidu search error: {e}")
 
     return results
 
@@ -362,8 +243,10 @@ def _search_wikipedia(query: str, max_results: int = 5) -> List[Dict[str, str]]:
             with httpx.Client(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
                 resp = client.get(api_url, params=params)
                 if resp.status_code != 200:
+                    _search_diagnostics.append(f"Wikipedia {lang}: HTTP {resp.status_code}")
                     continue
                 data = resp.json()
+                count = len(data.get("query", {}).get("search", []))
                 for item in data.get("query", {}).get("search", []):
                     title = item.get("title", "")
                     snippet = re.sub(r'<[^>]+>', '', item.get("snippet", ""))
@@ -374,10 +257,10 @@ def _search_wikipedia(query: str, max_results: int = 5) -> List[Dict[str, str]]:
                         "snippet": snippet[:300],
                         "source": f"Wikipedia ({lang})",
                     })
+                _search_diagnostics.append(f"Wikipedia {lang}: {count} results")
         except Exception as e:
             _search_diagnostics.append(f"Wikipedia {lang}: error - {e}")
 
-    _search_diagnostics.append(f"Wikipedia: found {len(results)} results")
     return results
 
 
@@ -391,17 +274,15 @@ def _fetch_url(url: str, max_chars: int = 5000) -> str:
         with httpx.Client(
             timeout=httpx.Timeout(15.0, connect=8.0),
             follow_redirects=True,
-            headers=HEADERS_MOBILE,
+            headers=HEADERS_DESKTOP,
         ) as client:
             resp = client.get(url)
             if resp.status_code != 200:
                 return f"HTTP Error: {resp.status_code}"
 
             content_type = resp.headers.get("content-type", "")
-            if "text/html" not in content_type and "text/plain" not in content_type:
-                return f"Unsupported content type: {content_type}"
-
             text = resp.text
+
             if "text/html" in content_type:
                 text = re.sub(r"<script[^>]*>.*?</script>", "", text, flags=re.DOTALL | re.IGNORECASE)
                 text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL | re.IGNORECASE)
@@ -446,37 +327,25 @@ def web_search(query: str, max_results: int = 5) -> str:
                 all_results.append(r)
                 seen_urls.add(u)
 
-    # Tier 1: Baidu Mobile
+    # Tier 1: Baidu Desktop
     add_results(_search_baidu(query, max_results))
 
-    # Tier 2: Baidu Desktop (different HTML, may find different results)
-    if len(all_results) < max_results:
-        add_results(_search_baidu_desktop(query, max_results))
-
-    # Tier 3: Wikipedia
+    # Tier 2: Wikipedia
     if len(all_results) < max_results:
         add_results(_search_wikipedia(query, max_results))
 
     final = all_results[:max_results]
 
-    if not final:
-        return tool_result({
-            "query": query,
-            "results": [],
-            "count": 0,
-            "message": "未找到相关结果，请尝试不同的搜索词",
-            "diagnostics": _search_diagnostics,
-        })
-
+    # ALWAYS include diagnostics so we can debug
     result_data = {
         "query": query,
         "results": final,
         "count": len(final),
+        "diagnostics": _search_diagnostics,
     }
 
-    failed = [d for d in _search_diagnostics if "error" in d.lower() or "found 0" in d.lower()]
-    if failed:
-        result_data["diagnostics"] = _search_diagnostics
+    if not final:
+        result_data["message"] = "未找到相关结果，请尝试不同的搜索词"
 
     return tool_result(result_data)
 
@@ -508,7 +377,7 @@ registry.register(
         "type": "function",
         "function": {
             "name": "web_search",
-            "description": "Search the web for information. Uses Baidu and Wikipedia. Returns results with titles, URLs, and snippets.",
+            "description": "Search the web for information using Baidu and Wikipedia.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -530,7 +399,7 @@ registry.register(
         "type": "function",
         "function": {
             "name": "web_fetch",
-            "description": "Fetch and read the content of a web page. Returns the text content of the page.",
+            "description": "Fetch and read the content of a web page.",
             "parameters": {
                 "type": "object",
                 "properties": {
