@@ -87,7 +87,7 @@ def _format_tool_results_readable(tool_calls_log: list) -> str:
             weekday = r.get("weekday", "")
             parts.append(f"现在是 {date} {weekday} {time}")
 
-        elif name == "web_search":
+        if name == "web_search":
             r = parsed.get("result", parsed)
             results = r.get("results", [])
             if results:
@@ -102,6 +102,12 @@ def _format_tool_results_readable(tool_calls_log: list) -> str:
             else:
                 msg = r.get("message", "未找到结果")
                 parts.append(f"搜索结果：{msg}")
+                # Always show diagnostics so we can debug
+                diagnostics = r.get("diagnostics", [])
+                if diagnostics:
+                    parts.append("调试信息：")
+                    for d in diagnostics:
+                        parts.append(f"  {d}")
 
         elif name in ("memory_add", "memory_replace", "memory_remove"):
             r = parsed.get("result", parsed)
@@ -1146,6 +1152,57 @@ def create_app() -> FastAPI:
     @app.get("/api/logs")
     async def api_get_logs():
         return []
+
+    # ----- Debug: Search -----
+
+    @app.get("/api/debug/search")
+    async def api_debug_search(q: str = "test"):
+        """Debug endpoint: test Baidu search and return raw HTML stats."""
+        import tools.web_search_tool as ws
+        ws._search_diagnostics = []
+        results = ws._search_baidu(q, 5)
+        return {
+            "query": q,
+            "results": results,
+            "result_count": len(results),
+            "diagnostics": ws._search_diagnostics,
+        }
+
+    @app.get("/api/debug/baidu_html")
+    async def api_debug_baidu_html(q: str = "test", chars: int = 2000):
+        """Debug: fetch Baidu HTML and return a sample + stats."""
+        try:
+            url = "https://www.baidu.com/s"
+            params = {"wd": q, "rn": "10", "ie": "utf-8"}
+            with httpx.Client(
+                timeout=httpx.Timeout(15.0, connect=8.0),
+                follow_redirects=True,
+                headers=ws.HEADERS_DESKTOP,
+            ) as client:
+                resp = client.get(url, params=params)
+                html = resp.text
+                # Count h3 tags
+                h3_count = len(re.findall(r'<h3', html))
+                # Count all links
+                link_count = len(re.findall(r'<a[^>]*href=', html))
+                # Count baidu.com/link
+                baidu_link_count = len(re.findall(r'baidu\.com/link', html))
+                # Sample of HTML
+                sample = html[:chars]
+                return {
+                    "query": q,
+                    "http_status": resp.status_code,
+                    "html_length": len(html),
+                    "h3_count": h3_count,
+                    "link_count": link_count,
+                    "baidu_link_count": baidu_link_count,
+                    "has_captcha": "验证码" in html or "captcha" in html.lower(),
+                    "has_login_redirect": "passport.baidu.com" in html,
+                    "title": re.search(r'<title>(.*?)</title>', html).group(1) if re.search(r'<title>(.*?)</title>', html) else "",
+                    "html_sample": sample,
+                }
+        except Exception as e:
+            return {"error": str(e)}
 
     return app
 
